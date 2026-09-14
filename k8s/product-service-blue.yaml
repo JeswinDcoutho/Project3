@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service-blue
+  namespace: ecommerce
+  labels:
+    app: product-service
+    version: blue
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: product-service
+        version: blue
+    spec:
+      containers:
+        - name: product-service
+          image: ecommerce-product-service:6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8002
+          env:
+            - name: POSTGRES_DB
+              value: product_db
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ecommerce-db-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ecommerce-db-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: ecommerce-config
+                  key: POSTGRES_HOST
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: ecommerce-config
+                  key: POSTGRES_PORT
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8002
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8002
+            initialDelaySeconds: 15
+            periodSeconds: 20

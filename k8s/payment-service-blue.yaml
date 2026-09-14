@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service-blue
+  namespace: ecommerce
+  labels:
+    app: payment-service
+    version: blue
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-service
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: payment-service
+        version: blue
+    spec:
+      containers:
+        - name: payment-service
+          image: ecommerce-payment-service:6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8005
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ecommerce-db-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ecommerce-db-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: ecommerce-config
+                  key: POSTGRES_HOST
+            - name: POSTGRES_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: ecommerce-config
+                  key: POSTGRES_PORT
+            - name: POSTGRES_DB
+              value: payment_db
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8005
+            initialDelaySeconds: 15
+            periodSeconds: 20

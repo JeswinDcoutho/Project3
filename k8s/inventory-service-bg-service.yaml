@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service-bg
+  namespace: ecommerce
+spec:
+  type: ClusterIP
+  selector:
+    app: inventory-service
+    version: blue
+  ports:
+    - port: 8006
+      targetPort: 8006
