@@ -1,0 +1,153 @@
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: ecommerce-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ecommerce
+      POSTGRES_PASSWORD: ecommerce_password
+      POSTGRES_DB: ecommerce
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecommerce"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis_data:/data
+
+    command: redis-server --appendonly yes
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  user-service:
+    build:
+      context: ./user-service
+
+    container_name: ecommerce-user-service
+
+    restart: unless-stopped
+
+    ports:
+      - "8001:8001"
+
+    env_file:
+      - ./user-service/.env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  product-service:
+    build:
+      context: ./product-service
+
+    container_name: ecommerce-product-service
+
+    restart: unless-stopped
+
+    ports:
+      - "8002:8002"
+
+    env_file:
+      - ./product-service/.env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cart-service:
+    build:
+      context: ./cart-service
+
+    container_name: ecommerce-cart-service
+
+    restart: unless-stopped
+
+    ports:
+      - "8003:8003"
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  order-service:
+    build:
+      context: ./order-service
+
+    container_name: ecommerce-order-service
+
+    restart: unless-stopped
+
+    ports:
+      - "8004:8004"
+
+    env_file:
+      - ./order-service/.env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  payment-service:
+    build:
+      context: ./payment-service
+
+    container_name: ecommerce-payment-service
+
+    restart: unless-stopped
+
+    ports:
+      - "8005:8005"
+
+    env_file:
+      - ./payment-service/.env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  inventory-service:
+    build:
+      context: ./inventory-service
+
+    container_name: ecommerce-inventory-service
+
+    restart: unless-stopped
+
+    ports:
+      - "8006:8006"
+
+    env_file:
+      - ./inventory-service/.env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+
+volumes:
+  postgres_data:
+  redis_data:
