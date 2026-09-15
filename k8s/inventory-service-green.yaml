@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: inventory-service-green
-  namespace: ecommerce
+  namespace: nodejs-devops
   labels:
     app: inventory-service
     version: green
@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: inventory-service
-          image: ecommerce-inventory-service:6
+          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-inventory-service:1.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8006

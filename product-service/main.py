@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -49,6 +50,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+Instrumentator().instrument(app).expose(app)
 
 class ProductCreate(BaseModel):
     id: int

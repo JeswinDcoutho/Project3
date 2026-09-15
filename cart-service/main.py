@@ -5,6 +5,7 @@ import redis
 from typing import List
 
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 
@@ -13,6 +14,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+Instrumentator().instrument(app).expose(app)
 
 # Redis configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")

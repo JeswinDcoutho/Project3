@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-service-monitor
+  namespace: nodejs-devops
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      monitoring: order-service
+  namespaceSelector:
+    matchNames:
+      - nodejs-devops
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: user-service-blue
-  namespace: ecommerce
+  namespace: nodejs-devops
   labels:
     app: user-service
     version: blue
@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: user-service
-          image: ecommerce-user-service:4
+          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-user-service:1.0
           imagePullPolicy: IfNotPresent
 
           ports:

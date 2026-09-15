@@ -1,4 +1,5 @@
 import os
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
@@ -87,6 +88,7 @@ app = FastAPI(
     title="E-Commerce Inventory Service",
     version="1.0.0"
 )
+Instrumentator().instrument(app).expose(app)
 
 
 # ============================================================

@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: order-service-bg
-  namespace: ecommerce
+  namespace: nodejs-devops
 spec:
   type: ClusterIP
   selector:

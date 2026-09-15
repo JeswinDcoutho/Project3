@@ -11,3 +11,12 @@ __pycache__/
 *.pyo
 
 .DS_Store
+
+# Terraform
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.*
+
+# Terraform variables/secrets
+**/*.tfvars
+**/*.tfvars.json

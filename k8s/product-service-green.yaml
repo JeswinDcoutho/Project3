@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: product-service-green
-  namespace: ecommerce
+  namespace: nodejs-devops
   labels:
     app: product-service
     version: green
@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: product-service
-          image: ecommerce-product-service:6
+          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-product-service:1.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8002

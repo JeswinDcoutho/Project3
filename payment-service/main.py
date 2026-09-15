@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -44,11 +45,13 @@ class PaymentDB(Base):
 
 Base.metadata.create_all(bind=engine)
 
-
 app = FastAPI(
     title="E-Commerce Payment Service",
     version="1.0.0"
 )
+
+Instrumentator().instrument(app).expose(app)
+
 
 
 class PaymentRequest(BaseModel):

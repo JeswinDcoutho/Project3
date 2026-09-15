@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import List
 from sqlalchemy import (
@@ -71,6 +72,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+Instrumentator().instrument(app).expose(app)
 
 class OrderItem(BaseModel):
     product_id: int
