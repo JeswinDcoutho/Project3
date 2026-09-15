@@ -2,443 +2,186 @@ pipeline {
     agent any
 
     environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '777000838263'
+        ECR_REGISTRY = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+        EKS_CLUSTER = 'ecommerce-eks'
+        NAMESPACE = 'nodejs-devops'
         IMAGE_TAG = "${BUILD_NUMBER}"
-
-        DOCKER_HOST = "tcp://192.168.49.2:2376"
-        DOCKER_TLS_VERIFY = "1"
-        DOCKER_CERT_PATH = "/var/lib/jenkins/minikube-certs"
-
-        NAMESPACE = "ecommerce"
-
-        USER_BLUE_DEPLOYMENT = "user-service-blue"
-        USER_GREEN_DEPLOYMENT = "user-service-green"
-        USER_BG_SERVICE = "user-service-bg"
-
-        PRODUCT_BLUE_DEPLOYMENT = "product-service-blue"
-        PRODUCT_GREEN_DEPLOYMENT = "product-service-green"
-        PRODUCT_BG_SERVICE = "product-service-bg"
-
-        CART_BLUE_DEPLOYMENT = "cart-service-blue"
-        CART_GREEN_DEPLOYMENT = "cart-service-green"
-        CART_BG_SERVICE = "cart-service-bg"
-
-        ORDER_BLUE_DEPLOYMENT = "order-service-blue"
-        ORDER_GREEN_DEPLOYMENT = "order-service-green"
-        ORDER_BG_SERVICE = "order-service-bg"
-
-        PAYMENT_BLUE_DEPLOYMENT = "payment-service-blue"
-        PAYMENT_GREEN_DEPLOYMENT = "payment-service-green"
-        PAYMENT_BG_SERVICE = "payment-service-bg"
-
-        INVENTORY_BLUE_DEPLOYMENT = "inventory-service-blue"
-        INVENTORY_GREEN_DEPLOYMENT = "inventory-service-green"
-        INVENTORY_BG_SERVICE = "inventory-service-bg"
     }
 
     stages {
-
-        stage('Build Docker Images') {
+        stage('Git Checkout') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "BUILDING DOCKER IMAGES"
-                    echo "Build Number: ${IMAGE_TAG}"
-                    echo "========================================="
-
-                    docker build -t ecommerce-user-service:${IMAGE_TAG} ./user-service
-                    docker build -t ecommerce-product-service:${IMAGE_TAG} ./product-service
-                    docker build -t ecommerce-cart-service:${IMAGE_TAG} ./cart-service
-                    docker build -t ecommerce-order-service:${IMAGE_TAG} ./order-service
-                    docker build -t ecommerce-payment-service:${IMAGE_TAG} ./payment-service
-                    docker build -t ecommerce-inventory-service:${IMAGE_TAG} ./inventory-service
-
-                    echo ""
-                    echo "All Docker images built successfully."
-                '''
+                git url: 'https://github.com/JeswinDcoutho/Project3.git', branch: 'master'
             }
         }
 
-        stage('Verify Docker Images') {
+        stage('Terraform Init') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "VERIFYING DOCKER IMAGES"
-                    echo "========================================="
-
-                    docker image inspect ecommerce-user-service:${IMAGE_TAG}
-                    docker image inspect ecommerce-product-service:${IMAGE_TAG}
-                    docker image inspect ecommerce-cart-service:${IMAGE_TAG}
-                    docker image inspect ecommerce-order-service:${IMAGE_TAG}
-                    docker image inspect ecommerce-payment-service:${IMAGE_TAG}
-                    docker image inspect ecommerce-inventory-service:${IMAGE_TAG}
-
-                    echo ""
-                    echo "All Docker images verified successfully."
-                '''
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-user']]) {
+                    sh 'terraform -chdir=terraform/vpc init -input=false'
+                    sh 'terraform -chdir=terraform/ecr init -input=false'
+                    sh 'terraform -chdir=terraform/eks init -input=false'
+                    sh 'terraform -chdir=terraform/rds init -input=false'
+                    sh 'terraform -chdir=terraform/redis init -input=false'
+                }
             }
         }
 
-        stage('Deploy Blue-Green Manifests') {
+        stage('Terraform Validate') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "DEPLOYING BLUE-GREEN MANIFESTS"
-                    echo "========================================="
-
-                    kubectl apply -f k8s/namespace.yaml
-                    kubectl apply -f k8s/configmap.yaml
-                    kubectl apply -f k8s/secret.yaml
-
-                    echo ""
-                    echo "Deploying User Service..."
-
-                    kubectl apply -f k8s/user-service-blue.yaml
-                    kubectl apply -f k8s/user-service-green.yaml
-                    kubectl apply -f k8s/user-service-bg-service.yaml
-
-                    echo ""
-                    echo "Deploying Product Service..."
-
-                    kubectl apply -f k8s/product-service-blue.yaml
-                    kubectl apply -f k8s/product-service-green.yaml
-                    kubectl apply -f k8s/product-service-bg-service.yaml
-
-                    echo ""
-                    echo "Deploying Cart Service..."
-
-                    kubectl apply -f k8s/cart-service-blue.yaml
-                    kubectl apply -f k8s/cart-service-green.yaml
-                    kubectl apply -f k8s/cart-service-bg-service.yaml
-
-                    echo ""
-                    echo "Deploying Order Service..."
-
-                    kubectl apply -f k8s/order-service-blue.yaml
-                    kubectl apply -f k8s/order-service-green.yaml
-                    kubectl apply -f k8s/order-service-bg-service.yaml
-
-                    echo ""
-                    echo "Deploying Payment Service..."
-
-                    kubectl apply -f k8s/payment-service-blue.yaml
-                    kubectl apply -f k8s/payment-service-green.yaml
-                    kubectl apply -f k8s/payment-service-bg-service.yaml
-
-                    echo ""
-                    echo "Deploying Inventory Service..."
-
-                    kubectl apply -f k8s/inventory-service-blue.yaml
-                    kubectl apply -f k8s/inventory-service-green.yaml
-                    kubectl apply -f k8s/inventory-service-bg-service.yaml
-
-                    echo ""
-                    echo "All Blue-Green manifests deployed successfully."
-                '''
+                sh 'terraform -chdir=terraform/vpc validate'
+                sh 'terraform -chdir=terraform/ecr validate'
+                sh 'terraform -chdir=terraform/eks validate'
+                sh 'terraform -chdir=terraform/rds validate'
+                sh 'terraform -chdir=terraform/redis validate'
             }
         }
 
-        stage('Update Green Deployments') {
+        stage('Terraform Plan') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "UPDATING GREEN DEPLOYMENTS"
-                    echo "Image Tag: ${IMAGE_TAG}"
-                    echo "========================================="
-
-                    kubectl set image deployment/${USER_GREEN_DEPLOYMENT} \
-                        user-service=ecommerce-user-service:${IMAGE_TAG} \
-                        -n ${NAMESPACE}
-
-                    kubectl set image deployment/${PRODUCT_GREEN_DEPLOYMENT} \
-                        product-service=ecommerce-product-service:${IMAGE_TAG} \
-                        -n ${NAMESPACE}
-
-                    kubectl set image deployment/${CART_GREEN_DEPLOYMENT} \
-                        cart-service=ecommerce-cart-service:${IMAGE_TAG} \
-                        -n ${NAMESPACE}
-
-                    kubectl set image deployment/${ORDER_GREEN_DEPLOYMENT} \
-                        order-service=ecommerce-order-service:${IMAGE_TAG} \
-                        -n ${NAMESPACE}
-
-                    kubectl set image deployment/${PAYMENT_GREEN_DEPLOYMENT} \
-                        payment-service=ecommerce-payment-service:${IMAGE_TAG} \
-                        -n ${NAMESPACE}
-
-                    kubectl set image deployment/${INVENTORY_GREEN_DEPLOYMENT} \
-                        inventory-service=ecommerce-inventory-service:${IMAGE_TAG} \
-                        -n ${NAMESPACE}
-
-                    echo ""
-                    echo "All Green deployments updated."
-                '''
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-user'], string(credentialsId: 'rds-db-password', variable: 'TF_VAR_db_password')]) {
+                    sh 'terraform -chdir=terraform/vpc plan -input=false'
+                    sh 'terraform -chdir=terraform/ecr plan -input=false'
+                    sh 'terraform -chdir=terraform/eks plan -input=false'
+                    sh 'terraform -chdir=terraform/rds plan -input=false'
+                    sh 'terraform -chdir=terraform/redis plan -input=false'
+                }
             }
         }
 
-        stage('Wait for Green Rollouts') {
+        stage('Docker Build') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "WAITING FOR GREEN ROLLOUTS"
-                    echo "========================================="
-
-                    kubectl rollout status deployment/${USER_GREEN_DEPLOYMENT} \
-                        -n ${NAMESPACE} \
-                        --timeout=180s
-
-                    kubectl rollout status deployment/${PRODUCT_GREEN_DEPLOYMENT} \
-                        -n ${NAMESPACE} \
-                        --timeout=180s
-
-                    kubectl rollout status deployment/${CART_GREEN_DEPLOYMENT} \
-                        -n ${NAMESPACE} \
-                        --timeout=180s
-
-                    kubectl rollout status deployment/${ORDER_GREEN_DEPLOYMENT} \
-                        -n ${NAMESPACE} \
-                        --timeout=180s
-
-                    kubectl rollout status deployment/${PAYMENT_GREEN_DEPLOYMENT} \
-                        -n ${NAMESPACE} \
-                        --timeout=180s
-
-                    kubectl rollout status deployment/${INVENTORY_GREEN_DEPLOYMENT} \
-                        -n ${NAMESPACE} \
-                        --timeout=180s
-
-                    echo ""
-                    echo "All Green deployments are ready."
-                '''
+                sh 'docker build -t $ECR_REGISTRY/ecommerce-user-service:$IMAGE_TAG ./user-service'
+                sh 'docker build -t $ECR_REGISTRY/ecommerce-product-service:$IMAGE_TAG ./product-service'
+                sh 'docker build -t $ECR_REGISTRY/ecommerce-cart-service:$IMAGE_TAG ./cart-service'
+                sh 'docker build -t $ECR_REGISTRY/ecommerce-order-service:$IMAGE_TAG ./order-service'
+                sh 'docker build -t $ECR_REGISTRY/ecommerce-payment-service:$IMAGE_TAG ./payment-service'
+                sh 'docker build -t $ECR_REGISTRY/ecommerce-inventory-service:$IMAGE_TAG ./inventory-service'
             }
         }
 
-        stage('Verify Green Pods') {
+        stage('ECR Login') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "VERIFYING GREEN PODS"
-                    echo "========================================="
-
-                    kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l version=green \
-                        -o wide
-
-                    echo ""
-                    echo "Green pod verification completed."
-                '''
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-user']]) {
+                    sh 'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY'
+                }
             }
         }
 
-        stage('Verify Green Health') {
+        stage('ECR Push') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "VERIFYING GREEN HEALTH"
-                    echo "========================================="
-
-                    echo ""
-                    echo "User Service:"
-                    USER_POD=$(kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l app=user-service,version=green \
-                        -o jsonpath='{.items[0].metadata.name}')
-
-                    kubectl exec ${USER_POD} -n ${NAMESPACE} -- \
-                        python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8001/health').read().decode())"
-
-                    echo ""
-                    echo "Product Service:"
-                    PRODUCT_POD=$(kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l app=product-service,version=green \
-                        -o jsonpath='{.items[0].metadata.name}')
-
-                    kubectl exec ${PRODUCT_POD} -n ${NAMESPACE} -- \
-                        python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8002/health').read().decode())"
-
-                    echo ""
-                    echo "Cart Service:"
-                    CART_POD=$(kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l app=cart-service,version=green \
-                        -o jsonpath='{.items[0].metadata.name}')
-
-                    kubectl exec ${CART_POD} -n ${NAMESPACE} -- \
-                        python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8003/health').read().decode())"
-
-                    echo ""
-                    echo "Order Service:"
-                    ORDER_POD=$(kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l app=order-service,version=green \
-                        -o jsonpath='{.items[0].metadata.name}')
-
-                    kubectl exec ${ORDER_POD} -n ${NAMESPACE} -- \
-                        python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8004/health').read().decode())"
-
-                    echo ""
-                    echo "Payment Service:"
-                    PAYMENT_POD=$(kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l app=payment-service,version=green \
-                        -o jsonpath='{.items[0].metadata.name}')
-
-                    kubectl exec ${PAYMENT_POD} -n ${NAMESPACE} -- \
-                        python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8005/health').read().decode())"
-
-                    echo ""
-                    echo "Inventory Service:"
-                    INVENTORY_POD=$(kubectl get pods \
-                        -n ${NAMESPACE} \
-                        -l app=inventory-service,version=green \
-                        -o jsonpath='{.items[0].metadata.name}')
-
-                    kubectl exec ${INVENTORY_POD} -n ${NAMESPACE} -- \
-                        python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8006/health').read().decode())"
-
-                    echo ""
-                    echo "All Green health checks passed."
-                '''
+                sh 'docker push $ECR_REGISTRY/ecommerce-user-service:$IMAGE_TAG'
+                sh 'docker push $ECR_REGISTRY/ecommerce-product-service:$IMAGE_TAG'
+                sh 'docker push $ECR_REGISTRY/ecommerce-cart-service:$IMAGE_TAG'
+                sh 'docker push $ECR_REGISTRY/ecommerce-order-service:$IMAGE_TAG'
+                sh 'docker push $ECR_REGISTRY/ecommerce-payment-service:$IMAGE_TAG'
+                sh 'docker push $ECR_REGISTRY/ecommerce-inventory-service:$IMAGE_TAG'
             }
         }
 
-        stage('Switch Traffic to Green') {
+        stage('Configure EKS') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "SWITCHING TRAFFIC TO GREEN"
-                    echo "========================================="
-
-                    kubectl patch svc ${USER_BG_SERVICE} \
-                        -n ${NAMESPACE} \
-                        -p '{"spec":{"selector":{"app":"user-service","version":"green"}}}'
-
-                    kubectl patch svc ${PRODUCT_BG_SERVICE} \
-                        -n ${NAMESPACE} \
-                        -p '{"spec":{"selector":{"app":"product-service","version":"green"}}}'
-
-                    kubectl patch svc ${CART_BG_SERVICE} \
-                        -n ${NAMESPACE} \
-                        -p '{"spec":{"selector":{"app":"cart-service","version":"green"}}}'
-
-                    kubectl patch svc ${ORDER_BG_SERVICE} \
-                        -n ${NAMESPACE} \
-                        -p '{"spec":{"selector":{"app":"order-service","version":"green"}}}'
-
-                    kubectl patch svc ${PAYMENT_BG_SERVICE} \
-                        -n ${NAMESPACE} \
-                        -p '{"spec":{"selector":{"app":"payment-service","version":"green"}}}'
-
-                    kubectl patch svc ${INVENTORY_BG_SERVICE} \
-                        -n ${NAMESPACE} \
-                        -p '{"spec":{"selector":{"app":"inventory-service","version":"green"}}}'
-
-                    echo ""
-                    echo "Traffic successfully switched to Green."
-                '''
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-terraform-user']]) {
+                    sh 'aws eks update-kubeconfig --region $AWS_DEFAULT_REGION --name $EKS_CLUSTER'
+                    sh 'kubectl get nodes'
+                }
             }
         }
 
-        stage('Verify Traffic') {
+        stage('Deploy Config') {
             steps {
-                sh '''
-                    set -e
-
-                    echo "========================================="
-                    echo "VERIFYING GREEN TRAFFIC"
-                    echo "========================================="
-
-                    echo ""
-                    echo "Service selectors:"
-
-                    kubectl get svc -n ${NAMESPACE} \
-                        -o custom-columns="SERVICE:.metadata.name,VERSION:.spec.selector.version"
-
-                    echo ""
-                    echo "Testing Ingress health endpoints..."
-
-                    curl -f http://192.168.49.2/users/health
-                    echo ""
-
-                    curl -f http://192.168.49.2/products/health
-                    echo ""
-
-                    curl -f http://192.168.49.2/cart/health
-                    echo ""
-
-                    curl -f http://192.168.49.2/orders/health
-                    echo ""
-
-                    curl -f http://192.168.49.2/payments/health
-                    echo ""
-
-                    curl -f http://192.168.49.2/inventory/health
-                    echo ""
-
-                    echo ""
-                    echo "All Green traffic health checks passed."
-                '''
+                sh 'kubectl apply -f k8s/configmap.yaml'
+                sh 'kubectl apply -f k8s/secret.yaml'
             }
         }
 
-        stage('Final Verification') {
+        stage('Deploy Blue Green') {
             steps {
-                sh '''
-                    set -e
+                sh 'kubectl apply -f k8s/user-service-bg-service.yaml'
+                sh 'kubectl apply -f k8s/product-service-bg-service.yaml'
+                sh 'kubectl apply -f k8s/cart-service-bg-service.yaml'
+                sh 'kubectl apply -f k8s/order-service-bg-service.yaml'
+                sh 'kubectl apply -f k8s/payment-service-bg-service.yaml'
+                sh 'kubectl apply -f k8s/inventory-service-bg-service.yaml'
+                sh 'kubectl apply -f k8s/user-service-green.yaml'
+                sh 'kubectl apply -f k8s/product-service-green.yaml'
+                sh 'kubectl apply -f k8s/cart-service-green.yaml'
+                sh 'kubectl apply -f k8s/order-service-green.yaml'
+                sh 'kubectl apply -f k8s/payment-service-green.yaml'
+                sh 'kubectl apply -f k8s/inventory-service-green.yaml'
+            }
+        }
 
-                    echo "========================================="
-                    echo "FINAL KUBERNETES VERIFICATION"
-                    echo "========================================="
+        stage('Update Green Images') {
+            steps {
+                sh 'kubectl set image deployment/user-service-green user-service=$ECR_REGISTRY/ecommerce-user-service:$IMAGE_TAG -n $NAMESPACE'
+                sh 'kubectl set image deployment/product-service-green product-service=$ECR_REGISTRY/ecommerce-product-service:$IMAGE_TAG -n $NAMESPACE'
+                sh 'kubectl set image deployment/cart-service-green cart-service=$ECR_REGISTRY/ecommerce-cart-service:$IMAGE_TAG -n $NAMESPACE'
+                sh 'kubectl set image deployment/order-service-green order-service=$ECR_REGISTRY/ecommerce-order-service:$IMAGE_TAG -n $NAMESPACE'
+                sh 'kubectl set image deployment/payment-service-green payment-service=$ECR_REGISTRY/ecommerce-payment-service:$IMAGE_TAG -n $NAMESPACE'
+                sh 'kubectl set image deployment/inventory-service-green inventory-service=$ECR_REGISTRY/ecommerce-inventory-service:$IMAGE_TAG -n $NAMESPACE'
+            }
+        }
 
-                    echo ""
-                    echo "Pods:"
-                    kubectl get pods -n ${NAMESPACE}
+        stage('Verify Rollout') {
+            steps {
+                sh 'kubectl rollout status deployment/user-service-green -n $NAMESPACE --timeout=180s'
+                sh 'kubectl rollout status deployment/product-service-green -n $NAMESPACE --timeout=180s'
+                sh 'kubectl rollout status deployment/cart-service-green -n $NAMESPACE --timeout=180s'
+                sh 'kubectl rollout status deployment/order-service-green -n $NAMESPACE --timeout=180s'
+                sh 'kubectl rollout status deployment/payment-service-green -n $NAMESPACE --timeout=180s'
+                sh 'kubectl rollout status deployment/inventory-service-green -n $NAMESPACE --timeout=180s'
+            }
+        }
 
-                    echo ""
-                    echo "Services:"
-                    kubectl get svc -n ${NAMESPACE}
+        stage('Apply HPA') {
+            steps {
+                sh 'kubectl apply -f k8s/user-hpa.yaml'
+                sh 'kubectl apply -f k8s/product-hpa.yaml'
+                sh 'kubectl apply -f k8s/cart-hpa.yaml'
+                sh 'kubectl apply -f k8s/order-hpa.yaml'
+                sh 'kubectl apply -f k8s/payment-hpa.yaml'
+                sh 'kubectl apply -f k8s/inventory-hpa.yaml'
+                sh 'kubectl get hpa -n $NAMESPACE'
+            }
+        }
 
-                    echo ""
-                    echo "Deployments:"
-                    kubectl get deployments -n ${NAMESPACE}
+        stage('Monitoring') {
+            steps {
+                sh 'helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace --set grafana.resources.requests.cpu=50m --set grafana.resources.requests.memory=128Mi --set grafana.resources.limits.cpu=300m --set grafana.resources.limits.memory=512Mi --set prometheus.prometheusSpec.resources.requests.cpu=100m --set prometheus.prometheusSpec.resources.requests.memory=256Mi --set prometheus.prometheusSpec.resources.limits.cpu=300m --set prometheus.prometheusSpec.resources.limits.memory=512Mi'
+            }
+        }
 
-                    echo ""
-                    echo "Blue-Green deployment completed successfully."
-                '''
+        stage('Service Monitors') {
+            steps {
+                sh 'kubectl apply -f k8s/user-service-monitor.yaml'
+                sh 'kubectl apply -f k8s/product-service-monitor.yaml'
+                sh 'kubectl apply -f k8s/cart-service-monitor.yaml'
+                sh 'kubectl apply -f k8s/order-service-monitor.yaml'
+                sh 'kubectl apply -f k8s/payment-service-monitor.yaml'
+                sh 'kubectl apply -f k8s/inventory-service-monitor.yaml'
+            }
+        }
+
+        stage('Health Checks') {
+            steps {
+                sh 'kubectl get pods -n $NAMESPACE'
+                sh 'kubectl get services -n $NAMESPACE'
+                sh 'kubectl get deployments -n $NAMESPACE'
+                sh 'kubectl get hpa -n $NAMESPACE'
+                sh 'kubectl get servicemonitors -n $NAMESPACE'
             }
         }
     }
 
     post {
         success {
-            echo "========================================="
-            echo "DEPLOYMENT SUCCESSFUL"
-            echo "Build: ${BUILD_NUMBER}"
-            echo "========================================="
+            echo 'E-Commerce Microservices CI/CD Pipeline completed successfully.'
         }
-
         failure {
-            echo "========================================="
-            echo "DEPLOYMENT FAILED"
-            echo "Build: ${BUILD_NUMBER}"
-            echo "========================================="
+            echo 'Pipeline failed. Check the failed stage in the Jenkins console.'
         }
     }
 }
