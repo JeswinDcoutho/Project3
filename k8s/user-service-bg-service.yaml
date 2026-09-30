@@ -3,15 +3,17 @@ kind: Service
 metadata:
   name: user-service-bg
   namespace: nodejs-devops
+  labels:
+    monitoring: user-service
 
 spec:
-  type: NodePort
+  type: ClusterIP
 
   selector:
     app: user-service
     version: blue
 
   ports:
-    - port: 8001
+    - name: http
+      port: 8001
       targetPort: 8001
-      nodePort: 30083

@@ -3,11 +3,17 @@ kind: Service
 metadata:
   name: order-service-bg
   namespace: nodejs-devops
+  labels:
+    monitoring: order-service
+
 spec:
   type: ClusterIP
+
   selector:
     app: order-service
     version: blue
+
   ports:
-    - port: 8004
+    - name: http
+      port: 8004
       targetPort: 8004
