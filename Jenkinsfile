@@ -104,7 +104,7 @@ pipeline {
         }
 
 
-        stage('Terraform Plan') {
+        stage('Terraform Infrastructure') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
@@ -114,66 +114,108 @@ pipeline {
                 ]) {
                     sh '''
                         set -e
+
+                        echo "======================================"
+                        echo " Terraform Infrastructure Deployment"
+                        echo "======================================"
+
+                        # ==================================================
+                        # VPC
+                        # ==================================================
 
                         echo "===== Terraform Plan: VPC ====="
+
                         cd terraform/vpc
                         terraform plan
+
+                        echo "===== Terraform Apply: VPC ====="
+
+                        terraform apply -auto-approve
+
+                        echo "===== Reading VPC ID ====="
+
+                        VPC_ID=$(terraform output -raw vpc_id)
+
+                        if [ -z "$VPC_ID" ]; then
+                            echo "ERROR: VPC ID was not returned by Terraform."
+                            exit 1
+                        fi
+
+                        echo "Created/Active VPC: $VPC_ID"
+
+                        cd ../..
+
+                        # ==================================================
+                        # ECR
+                        # ==================================================
 
                         echo "===== Terraform Plan: ECR ====="
-                        cd ../ecr
+
+                        cd terraform/ecr
                         terraform plan
+
+                        echo "===== Terraform Apply: ECR ====="
+
+                        terraform apply -auto-approve
+
+                        cd ../..
+
+                        # ==================================================
+                        # EKS
+                        # ==================================================
 
                         echo "===== Terraform Plan: EKS ====="
-                        cd ../eks
-                        terraform plan
+                        echo "Using VPC: $VPC_ID"
+
+                        cd terraform/eks
+
+                        terraform plan \
+                            -var="vpc_id=$VPC_ID"
+
+                        echo "===== Terraform Apply: EKS ====="
+
+                        terraform apply \
+                            -auto-approve \
+                            -var="vpc_id=$VPC_ID"
+
+                        cd ../..
+
+                        # ==================================================
+                        # RDS
+                        # ==================================================
 
                         echo "===== Terraform Plan: RDS ====="
-                        cd ../rds
+
+                        cd terraform/rds
                         terraform plan
+
+                        echo "===== Terraform Apply: RDS ====="
+
+                        terraform apply -auto-approve
+
+                        cd ../..
+
+                        # ==================================================
+                        # Redis
+                        # ==================================================
 
                         echo "===== Terraform Plan: Redis ====="
-                        cd ../redis
+
+                        cd terraform/redis
                         terraform plan
 
-                        echo "Terraform planning completed."
-                    '''
-                }
-            }
-        }
+                        echo "===== Terraform Apply: Redis ====="
 
-
-        stage('Terraform Apply') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user'],
-                    string(credentialsId: 'rds-db-password',
-                           variable: 'TF_VAR_db_password')
-                ]) {
-                    sh '''
-                        set -e
-
-                        echo "===== Creating VPC infrastructure ====="
-                        cd terraform/vpc
                         terraform apply -auto-approve
 
-                        echo "===== Creating ECR repositories ====="
-                        cd ../ecr
-                        terraform apply -auto-approve
+                        cd ../..
 
-                        echo "===== Creating EKS cluster ====="
-                        cd ../eks
-                        terraform apply -auto-approve
-
-                        echo "===== Creating RDS database ====="
-                        cd ../rds
-                        terraform apply -auto-approve
-
-                        echo "===== Creating Redis ====="
-                        cd ../redis
-                        terraform apply -auto-approve
-
-                        echo "===== Terraform Apply completed successfully ====="
+                        echo "======================================"
+                        echo " Terraform Infrastructure SUCCESS"
+                        echo "======================================"
+                        echo "VPC ID : $VPC_ID"
+                        echo "EKS    : ecommerce-eks"
+                        echo "======================================"
                     '''
                 }
             }
