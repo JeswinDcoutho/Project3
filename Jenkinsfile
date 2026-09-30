@@ -8,10 +8,11 @@ pipeline {
         EKS_CLUSTER        = 'ecommerce-eks'
         NAMESPACE          = 'nodejs-devops'
 
-        // Jenkins build number is used as Docker image tag.
+        // Jenkins build number is used as the Docker image tag.
         IMAGE_TAG = "${BUILD_NUMBER}"
 
-        // Blue/Green state is persisted in .bg-state after detection.
+        // Dedicated S3 object for the Kubernetes database secret.
+        DB_SECRET_S3_URI = 's3://ecommerce-terraform-state-777000838263/ecommerce/secrets/ecommerce-db-secret.json'
     }
 
     stages {
@@ -238,9 +239,9 @@ pipeline {
                         echo "======================================"
                         echo " Terraform Infrastructure SUCCESS"
                         echo "======================================"
-                        echo "VPC ID        : $VPC_ID"
-                        echo "EKS SG ID     : $EKS_SG_ID"
-                        echo "EKS           : ecommerce-eks"
+                        echo "VPC ID    : $VPC_ID"
+                        echo "EKS SG ID : $EKS_SG_ID"
+                        echo "EKS       : ecommerce-eks"
                         echo "======================================"
                     '''
                 }
@@ -383,41 +384,215 @@ pipeline {
 
         stage('Prepare Namespace') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    sh '''
-                        set -e
+                sh '''
+                    set -e
 
-                        kubectl create namespace $NAMESPACE \
-                            --dry-run=client \
-                            -o yaml | kubectl apply -f -
+                    kubectl create namespace $NAMESPACE \
+                        --dry-run=client \
+                        -o yaml | kubectl apply -f -
 
-                        kubectl get namespace $NAMESPACE
-                    '''
-                }
+                    kubectl get namespace $NAMESPACE
+                '''
             }
         }
 
+
+        // =========================================================
+        // 5. CONFIGURATION
+        // =========================================================
 
         stage('Deploy Config') {
             steps {
+                sh '''
+                    set -e
+
+                    echo "===== Applying ConfigMap ====="
+
+                    kubectl apply \
+                        -f k8s/configmap.yaml \
+                        -n $NAMESPACE
+
+                    kubectl get configmap \
+                        ecommerce-config \
+                        -n $NAMESPACE
+                '''
+            }
+        }
+
+
+        // =========================================================
+        // 6. DATABASE SECRET
+        // =========================================================
+
+        stage('Create Database Secret') {
+            steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
+                     credentialsId: 'aws-terraform-user'],
+                    string(credentialsId: 'rds-db-password',
+                           variable: 'RDS_DB_PASSWORD')
                 ]) {
                     sh '''
                         set -e
+                        set +x
 
-                        echo "===== Applying ConfigMap ====="
+                        echo "======================================"
+                        echo " Creating Database Secret"
+                        echo "======================================"
 
-                        kubectl apply \
-                            -f k8s/configmap.yaml \
-                            -n $NAMESPACE
+                        SECRET_NAME="ecommerce-db-secret"
+                        SECRET_FILE="$(mktemp)"
 
-                        kubectl get configmap \
-                            ecommerce-config \
+                        cleanup() {
+                            rm -f "$SECRET_FILE"
+                        }
+
+                        trap cleanup EXIT
+
+                        # --------------------------------------------------
+                        # Verify required tooling
+                        # --------------------------------------------------
+
+                        if ! command -v jq >/dev/null 2>&1; then
+                            echo "ERROR: jq is required for secure JSON generation."
+                            echo "Install jq on the Jenkins agent and retry."
+                            exit 1
+                        fi
+
+                        # --------------------------------------------------
+                        # Create Kubernetes Secret
+                        # --------------------------------------------------
+
+                        kubectl create secret generic "$SECRET_NAME" \
+                            --namespace "$NAMESPACE" \
+                            --from-literal=POSTGRES_USER=ecommerce \
+                            --from-literal=POSTGRES_PASSWORD="$RDS_DB_PASSWORD" \
+                            --dry-run=client \
+                            -o yaml | \
+                        kubectl apply -f -
+
+                        # --------------------------------------------------
+                        # Generate separate S3 secret object.
+                        #
+                        # IMPORTANT:
+                        # The password is never echoed.
+                        # --------------------------------------------------
+
+                        jq -n \
+                            --arg username "ecommerce" \
+                            --arg password "$RDS_DB_PASSWORD" \
+                            '{
+                                POSTGRES_USER: $username,
+                                POSTGRES_PASSWORD: $password
+                            }' > "$SECRET_FILE"
+
+                        # --------------------------------------------------
+                        # Upload to dedicated S3 object.
+                        # Existing Terraform state is NOT read.
+                        # --------------------------------------------------
+
+                        aws s3 cp \
+                            "$SECRET_FILE" \
+                            "$DB_SECRET_S3_URI" \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --sse AES256
+
+                        # --------------------------------------------------
+                        # Verify Kubernetes Secret exists without exposing
+                        # its contents.
+                        # --------------------------------------------------
+
+                        kubectl get secret "$SECRET_NAME" \
+                            -n "$NAMESPACE"
+
+                        echo "Kubernetes database Secret created/updated."
+
+                        echo "Dedicated S3 database secret object uploaded:"
+                        echo "$DB_SECRET_S3_URI"
+
+                        echo "Database secret preparation completed."
+                    '''
+                }
+            }
+        }
+
+
+        // =========================================================
+        // 7. ROLLING DEPLOYMENTS
+        // =========================================================
+
+        stage('Deploy Rolling Deployments') {
+            steps {
+                script {
+
+                    def services = [
+                        'user-service',
+                        'product-service',
+                        'cart-service',
+                        'order-service',
+                        'payment-service',
+                        'inventory-service'
+                    ]
+
+                    services.each { service ->
+
+                        echo "======================================"
+                        echo "Deploying ${service}"
+                        echo "Image tag: ${env.IMAGE_TAG}"
+                        echo "======================================"
+
+                        sh """
+                            set -e
+
+                            echo "Applying ${service} Deployment"
+
+                            sed 's|IMAGE_TAG_PLACEHOLDER|${IMAGE_TAG}|g' \
+                                k8s/${service}-deployment.yaml | \
+                            kubectl apply -f - \
+                                -n ${NAMESPACE}
+
+                            echo "Deployment ${service} applied."
+                        """
+                    }
+                }
+            }
+        }
+
+
+        // =========================================================
+        // 8. SERVICES
+        // =========================================================
+
+        stage('Deploy Services') {
+            steps {
+                script {
+
+                    def services = [
+                        'user-service',
+                        'product-service',
+                        'cart-service',
+                        'order-service',
+                        'payment-service',
+                        'inventory-service'
+                    ]
+
+                    services.each { service ->
+
+                        sh """
+                            set -e
+
+                            echo "Applying ${service} Service"
+
+                            kubectl apply \
+                                -f k8s/${service}-service.yaml \
+                                -n ${NAMESPACE}
+                        """
+                    }
+
+                    sh '''
+                        echo "===== Services ====="
+
+                        kubectl get services \
                             -n $NAMESPACE
                     '''
                 }
@@ -426,95 +601,40 @@ pipeline {
 
 
         // =========================================================
-        // 5. PREPARE BLUE/GREEN RESOURCES
+        // 9. HPA
         // =========================================================
 
-        stage('Prepare Blue Green Resources') {
+        stage('Deploy HPAs') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
+                script {
+
+                    def services = [
+                        'user-service',
+                        'product-service',
+                        'cart-service',
+                        'order-service',
+                        'payment-service',
+                        'inventory-service'
+                    ]
+
+                    services.each { service ->
+
+                        sh """
+                            set -e
+
+                            echo "Applying ${service} HPA"
+
+                            kubectl apply \
+                                -f k8s/${service}-hpa.yaml \
+                                -n ${NAMESPACE}
+                        """
+                    }
+
                     sh '''
-                        set -e
+                        echo "===== HPAs ====="
 
-                        echo "===== Preparing Blue/Green Deployments ====="
-
-                        kubectl get deployment user-service-blue \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/user-service-blue.yaml
-
-                        kubectl get deployment user-service-green \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/user-service-green.yaml
-
-                        kubectl get deployment product-service-blue \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/product-service-blue.yaml
-
-                        kubectl get deployment product-service-green \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/product-service-green.yaml
-
-                        kubectl get deployment cart-service-blue \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/cart-service-blue.yaml
-
-                        kubectl get deployment cart-service-green \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/cart-service-green.yaml
-
-                        kubectl get deployment order-service-blue \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/order-service-blue.yaml
-
-                        kubectl get deployment order-service-green \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/order-service-green.yaml
-
-                        kubectl get deployment payment-service-blue \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/payment-service-blue.yaml
-
-                        kubectl get deployment payment-service-green \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/payment-service-green.yaml
-
-                        kubectl get deployment inventory-service-blue \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/inventory-service-blue.yaml
-
-                        kubectl get deployment inventory-service-green \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/inventory-service-green.yaml
-
-                        echo "===== Preparing BG Services ====="
-
-                        kubectl get service user-service-bg \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/user-service-bg-service.yaml
-
-                        kubectl get service product-service-bg \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/product-service-bg-service.yaml
-
-                        kubectl get service cart-service-bg \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/cart-service-bg-service.yaml
-
-                        kubectl get service order-service-bg \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/order-service-bg-service.yaml
-
-                        kubectl get service payment-service-bg \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/payment-service-bg-service.yaml
-
-                        kubectl get service inventory-service-bg \
-                            -n $NAMESPACE >/dev/null 2>&1 || \
-                            kubectl apply -f k8s/inventory-service-bg-service.yaml
-
-                        echo "Blue/Green resources prepared."
+                        kubectl get hpa \
+                            -n $NAMESPACE
                     '''
                 }
             }
@@ -522,67 +642,42 @@ pipeline {
 
 
         // =========================================================
-        // 6. DETERMINE ACTIVE / TARGET COLOR
+        // 10. VERIFY ROLLING DEPLOYMENTS
         // =========================================================
 
-        stage('Determine Active Color') {
+        stage('Verify Rolling Deployments') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    script {
+                script {
 
-                        def currentColor = sh(
-                            script: """
-                                set +e
+                    def services = [
+                        'user-service',
+                        'product-service',
+                        'cart-service',
+                        'order-service',
+                        'payment-service',
+                        'inventory-service'
+                    ]
 
-                                kubectl get service user-service-bg \
-                                    -n ${NAMESPACE} \
-                                    -o jsonpath='{.spec.selector.version}' \
-                                    2>/dev/null || true
-                            """,
-                            returnStdout: true
-                        ).trim()
+                    services.each { service ->
 
-                        def activeColor
-                        def targetColor
+                        sh """
+                            set -e
 
-                        if (!currentColor) {
+                            echo "======================================"
+                            echo "Waiting for ${service} rollout"
+                            echo "======================================"
 
-                            echo "No active color detected."
-                            echo "Using BLUE as the initial production color."
+                            kubectl rollout status \
+                                deployment/${service} \
+                                -n ${NAMESPACE} \
+                                --timeout=300s
 
-                            activeColor = 'blue'
-                            targetColor = 'green'
+                            echo "===== ${service} Deployment ====="
 
-                        } else if (currentColor == 'blue') {
-
-                            activeColor = 'blue'
-                            targetColor = 'green'
-
-                        } else if (currentColor == 'green') {
-
-                            activeColor = 'green'
-                            targetColor = 'blue'
-
-                        } else {
-
-                            error "Invalid service selector color detected: ${currentColor}"
-                        }
-
-                        writeFile(
-                            file: '.bg-state',
-                            text: "${activeColor}\n${targetColor}\n"
-                        )
-
-                        echo "======================================"
-                        echo "Blue/Green Deployment Decision"
-                        echo "======================================"
-                        echo "Current color : ${activeColor}"
-                        echo "Target color  : ${targetColor}"
-                        echo "Image tag     : ${env.IMAGE_TAG}"
-                        echo "======================================"
+                            kubectl get deployment \
+                                ${service} \
+                                -n ${NAMESPACE}
+                        """
                     }
                 }
             }
@@ -590,665 +685,371 @@ pipeline {
 
 
         // =========================================================
-        // 7. DEPLOY NEW VERSION TO TARGET COLOR
+        // 11. VERIFY PODS AND SERVICE ENDPOINTS
         // =========================================================
 
-        stage('Deploy New Version') {
+        stage('Verify Services and Endpoints') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    script {
+                sh '''
+                    set -e
 
-                        def bgState = readFile('.bg-state').trim().split('\n')
+                    echo "======================================"
+                    echo "Verifying Services and Endpoints"
+                    echo "======================================"
 
-                        if (bgState.size() < 2) {
-                            error "Blue/Green state file is missing or invalid."
-                        }
+                    for service in \
+                        user-service \
+                        product-service \
+                        cart-service \
+                        order-service \
+                        payment-service \
+                        inventory-service
+                    do
 
-                        def currentColor = bgState[0].trim()
-                        def targetColor  = bgState[1].trim()
+                        echo "--------------------------------------"
+                        echo "Checking $service"
+                        echo "--------------------------------------"
 
-                        if (!(currentColor in ['blue', 'green']) ||
-                            !(targetColor in ['blue', 'green']) ||
-                            currentColor == targetColor) {
-                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
-                        }
+                        READY_REPLICAS=$(kubectl get deployment "$service" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.status.readyReplicas}')
 
-                        def services = [
-                            'user-service',
-                            'product-service',
-                            'cart-service',
-                            'order-service',
-                            'payment-service',
-                            'inventory-service'
-                        ]
+                        if [ -z "$READY_REPLICAS" ]; then
+                            READY_REPLICAS=0
+                        fi
 
-                        services.each { service ->
+                        if [ "$READY_REPLICAS" -lt 1 ]; then
+                            echo "ERROR: $service has no ready replicas."
+                            kubectl describe deployment "$service" \
+                                -n "$NAMESPACE" || true
+                            exit 1
+                        fi
 
-                            sh """
-                                set -e
+                        echo "Ready replicas: $READY_REPLICAS"
 
-                                echo "Updating ${service}-${targetColor}"
+                        ENDPOINT_COUNT=$(kubectl get endpoints "$service-bg" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{range .subsets[*].addresses[*]}1{end}' \
+                            | wc -c)
 
-                                kubectl set image \
-                                    deployment/${service}-${targetColor} \
-                                    ${service}=${ECR_REGISTRY}/ecommerce-${service}:${IMAGE_TAG} \
-                                    -n ${NAMESPACE}
-                            """
-                        }
-                    }
-                }
+                        if [ "$ENDPOINT_COUNT" -lt 1 ]; then
+                            echo "ERROR: $service-bg has no endpoints."
+                            kubectl describe service "$service-bg" \
+                                -n "$NAMESPACE" || true
+                            exit 1
+                        fi
+
+                        echo "$service-bg has active endpoints."
+
+                    done
+
+                    echo "======================================"
+                    echo "All Services and Endpoints verified."
+                    echo "======================================"
+                '''
             }
         }
 
 
         // =========================================================
-        // 8. VERIFY TARGET ROLLOUT
+        // 12. VERIFY HPA
         // =========================================================
 
-        stage('Verify New Version') {
+        stage('Verify HPA') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    script {
+                sh '''
+                    set -e
 
-                        def bgState = readFile('.bg-state').trim().split('\n')
+                    echo "======================================"
+                    echo "Verifying HPA Targets"
+                    echo "======================================"
 
-                        if (bgState.size() < 2) {
-                            error "Blue/Green state file is missing or invalid."
-                        }
+                    for service in \
+                        user-service \
+                        product-service \
+                        cart-service \
+                        order-service \
+                        payment-service \
+                        inventory-service
+                    do
 
-                        def currentColor = bgState[0].trim()
-                        def targetColor  = bgState[1].trim()
+                        HPA_NAME="${service}-hpa"
 
-                        if (!(currentColor in ['blue', 'green']) ||
-                            !(targetColor in ['blue', 'green']) ||
-                            currentColor == targetColor) {
-                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
-                        }
+                        echo "--------------------------------------"
+                        echo "Checking $HPA_NAME"
+                        echo "--------------------------------------"
 
-                        def services = [
-                            'user-service',
-                            'product-service',
-                            'cart-service',
-                            'order-service',
-                            'payment-service',
-                            'inventory-service'
-                        ]
+                        TARGET=$(kubectl get hpa "$HPA_NAME" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.scaleTargetRef.name}')
 
-                        try {
+                        EXPECTED="$service"
 
-                            services.each { service ->
+                        echo "HPA target   : $TARGET"
+                        echo "Expected     : $EXPECTED"
 
-                                sh """
-                                    set -e
+                        if [ "$TARGET" != "$EXPECTED" ]; then
+                            echo "ERROR: $HPA_NAME targets $TARGET"
+                            echo "Expected $EXPECTED"
+                            exit 1
+                        fi
 
-                                    echo "Waiting for ${service}-${targetColor}"
+                        MIN_REPLICAS=$(kubectl get hpa "$HPA_NAME" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.minReplicas}')
 
-                                    kubectl rollout status \
-                                        deployment/${service}-${targetColor} \
-                                        -n ${NAMESPACE} \
-                                        --timeout=300s
-                                """
-                            }
+                        MAX_REPLICAS=$(kubectl get hpa "$HPA_NAME" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.maxReplicas}')
 
-                            echo "======================================"
-                            echo "TARGET DEPLOYMENTS ARE HEALTHY"
-                            echo "Target color: ${targetColor}"
-                            echo "======================================"
+                        echo "Min replicas : $MIN_REPLICAS"
+                        echo "Max replicas : $MAX_REPLICAS"
 
-                        }
-                        catch (Exception e) {
+                        echo "$HPA_NAME verification passed."
 
-                            echo "======================================"
-                            echo "TARGET DEPLOYMENT FAILED"
-                            echo "Keeping production on ${currentColor}"
-                            echo "======================================"
+                    done
 
-                            currentBuild.result = 'FAILURE'
+                    echo "======================================"
+                    echo "All HPAs verified."
+                    echo "======================================"
 
-                            throw e
-                        }
-                    }
-                }
+                    kubectl get hpa \
+                        -n "$NAMESPACE"
+                '''
             }
         }
 
 
         // =========================================================
-        // 9. SWITCH TRAFFIC
-        // =========================================================
-
-        stage('Switch Traffic') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    script {
-
-                        def bgState = readFile('.bg-state').trim().split('\n')
-
-                        if (bgState.size() < 2) {
-                            error "Blue/Green state file is missing or invalid."
-                        }
-
-                        def currentColor = bgState[0].trim()
-                        def targetColor  = bgState[1].trim()
-
-                        if (!(currentColor in ['blue', 'green']) ||
-                            !(targetColor in ['blue', 'green']) ||
-                            currentColor == targetColor) {
-                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
-                        }
-
-                        def services = [
-                            'user-service',
-                            'product-service',
-                            'cart-service',
-                            'order-service',
-                            'payment-service',
-                            'inventory-service'
-                        ]
-
-                        try {
-
-                            services.each { service ->
-
-                                sh """
-                                    set -e
-
-                                    echo "Switching ${service}-bg to ${targetColor}"
-
-                                    kubectl patch service ${service}-bg \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${targetColor}"}}}'
-                                """
-                            }
-
-                            echo "Traffic switched to ${targetColor}."
-
-                        }
-                        catch (Exception e) {
-
-                            echo "Traffic switch failed."
-                            echo "Rolling back to ${currentColor}."
-
-                            services.each { service ->
-
-                                sh """
-                                    kubectl patch service ${service}-bg \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${currentColor}"}}}' \
-                                        || true
-                                """
-                            }
-
-                            throw e
-                        }
-                    }
-                }
-            }
-        }
-
-
-        // =========================================================
-        // 10. APPLY / UPDATE HPA TARGET
-        // =========================================================
-
-        stage('Update HPA Target') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    script {
-
-                        def bgState = readFile('.bg-state').trim().split('\n')
-
-                        if (bgState.size() < 2) {
-                            error "Blue/Green state file is missing or invalid."
-                        }
-
-                        def currentColor = bgState[0].trim()
-                        def targetColor  = bgState[1].trim()
-
-                        if (!(currentColor in ['blue', 'green']) ||
-                            !(targetColor in ['blue', 'green']) ||
-                            currentColor == targetColor) {
-                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
-                        }
-
-                        def services = [
-                            'user-service',
-                            'product-service',
-                            'cart-service',
-                            'order-service',
-                            'payment-service',
-                            'inventory-service'
-                        ]
-
-                        try {
-
-                            services.each { service ->
-
-                                sh """
-                                    set -e
-
-                                    echo "HPA target: ${service}-${targetColor}"
-
-                                    kubectl patch hpa ${service}-hpa \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${targetColor}"}}}'
-                                """
-                            }
-
-                            echo "All HPAs now target ${targetColor}."
-
-                        }
-                        catch (Exception e) {
-
-                            echo "HPA update failed."
-                            echo "Rolling traffic back to ${currentColor}."
-
-                            services.each { service ->
-
-                                sh """
-                                    kubectl patch service ${service}-bg \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${currentColor}"}}}' \
-                                        || true
-
-                                    kubectl patch hpa ${service}-hpa \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${currentColor}"}}}' \
-                                        || true
-                                """
-                            }
-
-                            throw e
-                        }
-                    }
-                }
-            }
-        }
-
-
-        // =========================================================
-        // 11. VERIFY TRAFFIC AND HPA
-        // =========================================================
-
-        stage('Verify Traffic and HPA') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    script {
-
-                        def bgState = readFile('.bg-state').trim().split('\n')
-
-                        if (bgState.size() < 2) {
-                            error "Blue/Green state file is missing or invalid."
-                        }
-
-                        def currentColor = bgState[0].trim()
-                        def targetColor  = bgState[1].trim()
-
-                        if (!(currentColor in ['blue', 'green']) ||
-                            !(targetColor in ['blue', 'green']) ||
-                            currentColor == targetColor) {
-                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
-                        }
-
-                        def services = [
-                            'user-service',
-                            'product-service',
-                            'cart-service',
-                            'order-service',
-                            'payment-service',
-                            'inventory-service'
-                        ]
-
-                        try {
-
-                            services.each { service ->
-
-                                sh """
-                                    set -e
-
-                                    echo "======================================"
-                                    echo "Verifying ${service}"
-                                    echo "======================================"
-
-                                    ACTIVE_COLOR=\\\$(kubectl get service ${service}-bg \
-                                        -n ${NAMESPACE} \
-                                        -o jsonpath='{.spec.selector.version}')
-
-                                    echo "Service selector: \\\$ACTIVE_COLOR"
-                                    echo "Expected color:   ${targetColor}"
-
-                                    if [ "\\\$ACTIVE_COLOR" != "${targetColor}" ]; then
-                                        echo "ERROR: ${service}-bg is pointing to \\\$ACTIVE_COLOR"
-                                        echo "Expected ${targetColor}"
-                                        exit 1
-                                    fi
-
-                                    HPA_TARGET=\\\$(kubectl get hpa ${service}-hpa \
-                                        -n ${NAMESPACE} \
-                                        -o jsonpath='{.spec.scaleTargetRef.name}')
-
-                                    EXPECTED_HPA_TARGET="${service}-${targetColor}"
-
-                                    echo "HPA target:       \\\$HPA_TARGET"
-                                    echo "Expected target:  \\\$EXPECTED_HPA_TARGET"
-
-                                    if [ "\\\$HPA_TARGET" != "\\\$EXPECTED_HPA_TARGET" ]; then
-                                        echo "ERROR: ${service}-hpa is targeting \\\$HPA_TARGET"
-                                        echo "Expected \\\\$EXPECTED_HPA_TARGET"
-                                        exit 1
-                                    fi
-
-                                    kubectl get deployment \
-                                        ${service}-${targetColor} \
-                                        -n ${NAMESPACE}
-
-                                    READY_REPLICAS=\\\$(kubectl get deployment \
-                                        ${service}-${targetColor} \
-                                        -n ${NAMESPACE} \
-                                        -o jsonpath='{.status.readyReplicas}')
-
-                                    DESIRED_REPLICAS=\\\$(kubectl get deployment \
-                                        ${service}-${targetColor} \
-                                        -n ${NAMESPACE} \
-                                        -o jsonpath='{.spec.replicas}')
-
-                                    echo "Ready replicas:   \\\$READY_REPLICAS"
-                                    echo "Desired replicas: \\\$DESIRED_REPLICAS"
-
-                                    if [ -z "\\\$READY_REPLICAS" ]; then
-                                        echo "ERROR: ${service}-${targetColor} has no ready replicas"
-                                        exit 1
-                                    fi
-
-                                    if [ "\\\$READY_REPLICAS" -lt "\\\$DESIRED_REPLICAS" ]; then
-                                        echo "ERROR: ${service}-${targetColor} does not have all desired replicas ready"
-                                        exit 1
-                                    fi
-
-                                    echo "✓ ${service} verification passed."
-                                    echo
-                                """
-                            }
-
-                            echo "======================================"
-                            echo "ALL BLUE/GREEN VERIFICATIONS PASSED"
-                            echo "======================================"
-                            echo "Production color: ${targetColor}"
-                            echo "All Services point to ${targetColor}"
-                            echo "All HPAs target ${targetColor} deployments"
-                            echo "All ${targetColor} deployments are ready"
-                            echo "======================================"
-
-                        }
-                        catch (Exception e) {
-
-                            echo "======================================"
-                            echo "POST-DEPLOYMENT VERIFICATION FAILED"
-                            echo "ROLLING BACK TO ${currentColor}"
-                            echo "======================================"
-
-                            services.each { service ->
-
-                                sh """
-                                    kubectl patch service ${service}-bg \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${currentColor}"}}}' \
-                                        || true
-
-                                    kubectl patch hpa ${service}-hpa \
-                                        -n ${NAMESPACE} \
-                                        --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${currentColor}"}}}' \
-                                        || true
-                                """
-                            }
-
-                            echo "Rollback completed."
-
-                            throw e
-                        }
-                    }
-                }
-            }
-        }
-
-
-        // =========================================================
-        // 12. MONITORING
+        // 13. MONITORING
         // =========================================================
 
         stage('Apply Monitoring') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    sh '''
-                        set -e
+                sh '''
+                    set -e
 
-                        echo "===== Adding Prometheus Helm Repository ====="
+                    echo "===== Adding Prometheus Helm Repository ====="
 
-                        helm repo add prometheus-community \
-                            https://prometheus-community.github.io/helm-charts \
-                            || true
+                    helm repo add prometheus-community \
+                        https://prometheus-community.github.io/helm-charts \
+                        || true
 
-                        helm repo update
+                    helm repo update
 
-                        echo "===== Installing/Updating Monitoring Stack ====="
+                    echo "===== Installing/Updating Monitoring Stack ====="
 
-                        helm upgrade --install monitoring \
-                            prometheus-community/kube-prometheus-stack \
-                            --namespace monitoring \
-                            --create-namespace \
-                            --set grafana.resources.requests.cpu=50m \
-                            --set grafana.resources.requests.memory=128Mi \
-                            --set grafana.resources.limits.cpu=300m \
-                            --set grafana.resources.limits.memory=512Mi \
-                            --set prometheus.prometheusSpec.resources.requests.cpu=100m \
-                            --set prometheus.prometheusSpec.resources.requests.memory=256Mi \
-                            --set prometheus.prometheusSpec.resources.limits.cpu=300m \
-                            --set prometheus.prometheusSpec.resources.limits.memory=512Mi
+                    helm upgrade --install monitoring \
+                        prometheus-community/kube-prometheus-stack \
+                        --namespace monitoring \
+                        --create-namespace \
+                        --set grafana.resources.requests.cpu=50m \
+                        --set grafana.resources.requests.memory=128Mi \
+                        --set grafana.resources.limits.cpu=300m \
+                        --set grafana.resources.limits.memory=512Mi \
+                        --set prometheus.prometheusSpec.resources.requests.cpu=100m \
+                        --set prometheus.prometheusSpec.resources.requests.memory=256Mi \
+                        --set prometheus.prometheusSpec.resources.limits.cpu=300m \
+                        --set prometheus.prometheusSpec.resources.limits.memory=512Mi
 
-                        kubectl get pods -n monitoring
-                    '''
-                }
+                    echo "===== Monitoring Pods ====="
+
+                    kubectl get pods \
+                        -n monitoring
+                '''
             }
         }
 
 
         // =========================================================
-        // 13. SERVICE MONITORS
+        // 14. SERVICE MONITORS
         // =========================================================
 
         stage('Apply ServiceMonitors') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    sh '''
-                        set -e
+                sh '''
+                    set -e
 
-                        kubectl apply \
-                            -f k8s/user-service-monitor.yaml \
-                            -n $NAMESPACE
+                    kubectl apply \
+                        -f k8s/user-service-monitor.yaml \
+                        -n $NAMESPACE
 
-                        kubectl apply \
-                            -f k8s/product-service-monitor.yaml \
-                            -n $NAMESPACE
+                    kubectl apply \
+                        -f k8s/product-service-monitor.yaml \
+                        -n $NAMESPACE
 
-                        kubectl apply \
-                            -f k8s/cart-service-monitor.yaml \
-                            -n $NAMESPACE
+                    kubectl apply \
+                        -f k8s/cart-service-monitor.yaml \
+                        -n $NAMESPACE
 
-                        kubectl apply \
-                            -f k8s/order-service-monitor.yaml \
-                            -n $NAMESPACE
+                    kubectl apply \
+                        -f k8s/order-service-monitor.yaml \
+                        -n $NAMESPACE
 
-                        kubectl apply \
-                            -f k8s/payment-service-monitor.yaml \
-                            -n $NAMESPACE
+                    kubectl apply \
+                        -f k8s/payment-service-monitor.yaml \
+                        -n $NAMESPACE
 
-                        kubectl apply \
-                            -f k8s/inventory-service-monitor.yaml \
-                            -n $NAMESPACE
+                    kubectl apply \
+                        -f k8s/inventory-service-monitor.yaml \
+                        -n $NAMESPACE
 
-                        echo "===== ServiceMonitors ====="
+                    echo "===== ServiceMonitors ====="
 
-                        kubectl get servicemonitor \
-                            -n $NAMESPACE
-                    '''
-                }
+                    kubectl get servicemonitor \
+                        -n $NAMESPACE
+                '''
             }
         }
 
 
         // =========================================================
-        // 14. FINAL HEALTH CHECKS
+        // 15. FINAL HEALTH CHECKS
         // =========================================================
 
         stage('Final Health Checks') {
             steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
-                ]) {
-                    sh '''
-                        set -e
+                sh '''
+                    set -e
 
-                        echo "======================================"
-                        echo "       FINAL DEPLOYMENT STATUS"
-                        echo "======================================"
+                    echo "======================================"
+                    echo "       FINAL DEPLOYMENT STATUS"
+                    echo "======================================"
 
-                        echo "===== Actual Production Color ====="
+                    echo "===== Nodes ====="
 
-                        ACTIVE_COLOR=$(kubectl get service user-service-bg \
-                            -n $NAMESPACE \
-                            -o jsonpath='{.spec.selector.version}')
+                    kubectl get nodes
 
-                        echo "Actual production color: $ACTIVE_COLOR"
-                        echo
+                    echo "===== Rolling Deployments ====="
 
-                        echo "===== Nodes ====="
-                        kubectl get nodes
+                    kubectl get deployments \
+                        -n $NAMESPACE
 
-                        echo "===== Deployments ====="
-                        kubectl get deployments \
-                            -n $NAMESPACE
+                    echo "===== Pods ====="
 
-                        echo "===== Pods ====="
-                        kubectl get pods \
-                            -n $NAMESPACE \
-                            -o wide
+                    kubectl get pods \
+                        -n $NAMESPACE \
+                        -o wide
 
-                        echo "===== Services ====="
-                        kubectl get services \
-                            -n $NAMESPACE
+                    echo "===== Services ====="
 
-                        echo "===== HPA ====="
-                        kubectl get hpa \
-                            -n $NAMESPACE
+                    kubectl get services \
+                        -n $NAMESPACE
 
-                        echo "===== HPA Details ====="
+                    echo "===== Endpoints ====="
 
-                        kubectl describe hpa user-service-hpa \
-                            -n $NAMESPACE || true
+                    kubectl get endpoints \
+                        -n $NAMESPACE
 
-                        kubectl describe hpa product-service-hpa \
-                            -n $NAMESPACE || true
+                    echo "===== HPA ====="
 
-                        kubectl describe hpa cart-service-hpa \
-                            -n $NAMESPACE || true
+                    kubectl get hpa \
+                        -n $NAMESPACE
 
-                        kubectl describe hpa order-service-hpa \
-                            -n $NAMESPACE || true
+                    echo "===== HPA Details ====="
 
-                        kubectl describe hpa payment-service-hpa \
-                            -n $NAMESPACE || true
+                    kubectl describe hpa user-service-hpa \
+                        -n $NAMESPACE || true
 
-                        kubectl describe hpa inventory-service-hpa \
-                            -n $NAMESPACE || true
+                    kubectl describe hpa product-service-hpa \
+                        -n $NAMESPACE || true
 
-                        echo "===== Ingress ====="
+                    kubectl describe hpa cart-service-hpa \
+                        -n $NAMESPACE || true
 
-                        kubectl get ingress \
-                            -A || true
+                    kubectl describe hpa order-service-hpa \
+                        -n $NAMESPACE || true
 
-                        echo "===== ServiceMonitors ====="
+                    kubectl describe hpa payment-service-hpa \
+                        -n $NAMESPACE || true
 
-                        kubectl get servicemonitor \
-                            -n $NAMESPACE
+                    kubectl describe hpa inventory-service-hpa \
+                        -n $NAMESPACE || true
 
-                        echo "===== Monitoring ====="
+                    echo "===== Ingress ====="
 
-                        kubectl get pods \
-                            -n monitoring
+                    kubectl get ingress \
+                        -A || true
 
-                        echo "===== Actual Blue/Green Status ====="
+                    echo "===== ServiceMonitors ====="
 
-                        for service in \
-                            user-service \
-                            product-service \
-                            cart-service \
-                            order-service \
-                            payment-service \
-                            inventory-service
-                        do
-                            echo "---- $service ----"
+                    kubectl get servicemonitor \
+                        -n $NAMESPACE
 
-                            echo -n "Service selector: "
+                    echo "===== Monitoring ====="
 
-                            kubectl get service ${service}-bg \
-                                -n $NAMESPACE \
-                                -o jsonpath='{.spec.selector.version}'
+                    kubectl get pods \
+                        -n monitoring
 
-                            echo
+                    echo "===== Rolling Deployment Verification ====="
 
-                            echo -n "HPA target: "
+                    for service in \
+                        user-service \
+                        product-service \
+                        cart-service \
+                        order-service \
+                        payment-service \
+                        inventory-service
+                    do
 
-                            kubectl get hpa ${service}-hpa \
-                                -n $NAMESPACE \
-                                -o jsonpath='{.spec.scaleTargetRef.name}'
+                        echo "--------------------------------------"
+                        echo "$service"
+                        echo "--------------------------------------"
 
-                            echo
+                        READY_REPLICAS=$(kubectl get deployment "$service" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.status.readyReplicas}')
 
-                            echo -n "Ready replicas: "
+                        DESIRED_REPLICAS=$(kubectl get deployment "$service" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.replicas}')
 
-                            kubectl get deployment ${service}-${ACTIVE_COLOR} \
-                                -n $NAMESPACE \
-                                -o jsonpath='{.status.readyReplicas}'
+                        IMAGE=$(kubectl get deployment "$service" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-                            echo
-                            echo
-                        done
+                        HPA_TARGET=$(kubectl get hpa "${service}-hpa" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.scaleTargetRef.name}')
 
-                        echo "======================================"
-                        echo "Deployment health checks completed."
-                        echo "Actual production color: $ACTIVE_COLOR"
-                        echo "======================================"
-                    '''
-                }
+                        SERVICE_SELECTOR=$(kubectl get service "${service}-bg" \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.selector}')
+
+                        echo "Image           : $IMAGE"
+                        echo "Ready replicas  : $READY_REPLICAS"
+                        echo "Desired replicas: $DESIRED_REPLICAS"
+                        echo "HPA target      : $HPA_TARGET"
+                        echo "Service selector: $SERVICE_SELECTOR"
+
+                        if [ -z "$READY_REPLICAS" ]; then
+                            echo "ERROR: $service has no ready replicas."
+                            exit 1
+                        fi
+
+                        if [ "$READY_REPLICAS" -lt 1 ]; then
+                            echo "ERROR: $service does not have a ready replica."
+                            exit 1
+                        fi
+
+                        if [ "$HPA_TARGET" != "$service" ]; then
+                            echo "ERROR: ${service}-hpa targets $HPA_TARGET"
+                            exit 1
+                        fi
+
+                        echo "$service health check passed."
+
+                    done
+
+                    echo "======================================"
+                    echo " ALL FINAL HEALTH CHECKS PASSED"
+                    echo "======================================"
+
+                    echo "Deployment model : RollingUpdate"
+                    echo "Image tag        : $IMAGE_TAG"
+                    echo "Namespace        : $NAMESPACE"
+                    echo "======================================"
+                '''
             }
         }
     }
@@ -1261,27 +1062,23 @@ pipeline {
     post {
 
         success {
-            script {
-                def productionColor = sh(
-                    script: """
-                        kubectl get service user-service-bg \
-                            -n ${NAMESPACE} \
-                            -o jsonpath='{.spec.selector.version}'
-                    """,
-                    returnStdout: true
-                ).trim()
-
-                echo '======================================'
-                echo 'Project 3 Jenkins Pipeline SUCCESS'
-                echo "Production color: ${productionColor}"
-                echo '======================================'
-            }
+            echo '======================================'
+            echo 'Project 3 Jenkins Pipeline SUCCESS'
+            echo 'Deployment strategy: RollingUpdate'
+            echo "Image tag: ${env.IMAGE_TAG}"
+            echo '======================================'
         }
 
         failure {
             echo '======================================'
             echo 'Project 3 Jenkins Pipeline FAILED'
             echo 'Check the failed stage in Console Output.'
+            echo '======================================'
+        }
+
+        always {
+            echo '======================================'
+            echo 'Pipeline execution completed.'
             echo '======================================'
         }
     }
