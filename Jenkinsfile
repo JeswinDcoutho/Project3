@@ -11,9 +11,7 @@ pipeline {
         // Jenkins build number is used as Docker image tag.
         IMAGE_TAG = "${BUILD_NUMBER}"
 
-        // Calculated during the pipeline.
-        CURRENT_COLOR = ''
-        TARGET_COLOR  = ''
+        // Blue/Green state is persisted in .bg-state after detection.
     }
 
     stages {
@@ -536,47 +534,53 @@ pipeline {
                     script {
 
                         def currentColor = sh(
-                            script: '''
+                            script: """
                                 set +e
 
                                 kubectl get service user-service-bg \
-                                    -n nodejs-devops \
+                                    -n ${NAMESPACE} \
                                     -o jsonpath='{.spec.selector.version}' \
-                                    2>/dev/null
-
-                                exit 0
-                            ''',
+                                    2>/dev/null || true
+                            """,
                             returnStdout: true
                         ).trim()
+
+                        def activeColor
+                        def targetColor
 
                         if (!currentColor) {
 
                             echo "No active color detected."
                             echo "Using BLUE as the initial production color."
 
-                            env.CURRENT_COLOR = 'blue'
-                            env.TARGET_COLOR  = 'green'
+                            activeColor = 'blue'
+                            targetColor = 'green'
 
                         } else if (currentColor == 'blue') {
 
-                            env.CURRENT_COLOR = 'blue'
-                            env.TARGET_COLOR  = 'green'
+                            activeColor = 'blue'
+                            targetColor = 'green'
 
                         } else if (currentColor == 'green') {
 
-                            env.CURRENT_COLOR = 'green'
-                            env.TARGET_COLOR  = 'blue'
+                            activeColor = 'green'
+                            targetColor = 'blue'
 
                         } else {
 
                             error "Invalid service selector color detected: ${currentColor}"
                         }
 
+                        writeFile(
+                            file: '.bg-state',
+                            text: "${activeColor}\n${targetColor}\n"
+                        )
+
                         echo "======================================"
                         echo "Blue/Green Deployment Decision"
                         echo "======================================"
-                        echo "Current color : ${env.CURRENT_COLOR}"
-                        echo "Target color  : ${env.TARGET_COLOR}"
+                        echo "Current color : ${activeColor}"
+                        echo "Target color  : ${targetColor}"
                         echo "Image tag     : ${env.IMAGE_TAG}"
                         echo "======================================"
                     }
@@ -597,6 +601,21 @@ pipeline {
                 ]) {
                     script {
 
+                        def bgState = readFile('.bg-state').trim().split('\n')
+
+                        if (bgState.size() < 2) {
+                            error "Blue/Green state file is missing or invalid."
+                        }
+
+                        def currentColor = bgState[0].trim()
+                        def targetColor  = bgState[1].trim()
+
+                        if (!(currentColor in ['blue', 'green']) ||
+                            !(targetColor in ['blue', 'green']) ||
+                            currentColor == targetColor) {
+                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
+                        }
+
                         def services = [
                             'user-service',
                             'product-service',
@@ -611,10 +630,10 @@ pipeline {
                             sh """
                                 set -e
 
-                                echo "Updating ${service}-${env.TARGET_COLOR}"
+                                echo "Updating ${service}-${targetColor}"
 
                                 kubectl set image \
-                                    deployment/${service}-${env.TARGET_COLOR} \
+                                    deployment/${service}-${targetColor} \
                                     ${service}=${ECR_REGISTRY}/ecommerce-${service}:${IMAGE_TAG} \
                                     -n ${NAMESPACE}
                             """
@@ -637,6 +656,21 @@ pipeline {
                 ]) {
                     script {
 
+                        def bgState = readFile('.bg-state').trim().split('\n')
+
+                        if (bgState.size() < 2) {
+                            error "Blue/Green state file is missing or invalid."
+                        }
+
+                        def currentColor = bgState[0].trim()
+                        def targetColor  = bgState[1].trim()
+
+                        if (!(currentColor in ['blue', 'green']) ||
+                            !(targetColor in ['blue', 'green']) ||
+                            currentColor == targetColor) {
+                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
+                        }
+
                         def services = [
                             'user-service',
                             'product-service',
@@ -653,10 +687,10 @@ pipeline {
                                 sh """
                                     set -e
 
-                                    echo "Waiting for ${service}-${env.TARGET_COLOR}"
+                                    echo "Waiting for ${service}-${targetColor}"
 
                                     kubectl rollout status \
-                                        deployment/${service}-${env.TARGET_COLOR} \
+                                        deployment/${service}-${targetColor} \
                                         -n ${NAMESPACE} \
                                         --timeout=300s
                                 """
@@ -664,7 +698,7 @@ pipeline {
 
                             echo "======================================"
                             echo "TARGET DEPLOYMENTS ARE HEALTHY"
-                            echo "Target color: ${env.TARGET_COLOR}"
+                            echo "Target color: ${targetColor}"
                             echo "======================================"
 
                         }
@@ -672,7 +706,7 @@ pipeline {
 
                             echo "======================================"
                             echo "TARGET DEPLOYMENT FAILED"
-                            echo "Keeping production on ${env.CURRENT_COLOR}"
+                            echo "Keeping production on ${currentColor}"
                             echo "======================================"
 
                             currentBuild.result = 'FAILURE'
@@ -697,6 +731,21 @@ pipeline {
                 ]) {
                     script {
 
+                        def bgState = readFile('.bg-state').trim().split('\n')
+
+                        if (bgState.size() < 2) {
+                            error "Blue/Green state file is missing or invalid."
+                        }
+
+                        def currentColor = bgState[0].trim()
+                        def targetColor  = bgState[1].trim()
+
+                        if (!(currentColor in ['blue', 'green']) ||
+                            !(targetColor in ['blue', 'green']) ||
+                            currentColor == targetColor) {
+                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
+                        }
+
                         def services = [
                             'user-service',
                             'product-service',
@@ -713,22 +762,22 @@ pipeline {
                                 sh """
                                     set -e
 
-                                    echo "Switching ${service}-bg to ${env.TARGET_COLOR}"
+                                    echo "Switching ${service}-bg to ${targetColor}"
 
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.TARGET_COLOR}"}}}'
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${targetColor}"}}}'
                                 """
                             }
 
-                            echo "Traffic switched to ${env.TARGET_COLOR}."
+                            echo "Traffic switched to ${targetColor}."
 
                         }
                         catch (Exception e) {
 
                             echo "Traffic switch failed."
-                            echo "Rolling back to ${env.CURRENT_COLOR}."
+                            echo "Rolling back to ${currentColor}."
 
                             services.each { service ->
 
@@ -736,7 +785,7 @@ pipeline {
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${currentColor}"}}}' \
                                         || true
                                 """
                             }
@@ -761,6 +810,21 @@ pipeline {
                 ]) {
                     script {
 
+                        def bgState = readFile('.bg-state').trim().split('\n')
+
+                        if (bgState.size() < 2) {
+                            error "Blue/Green state file is missing or invalid."
+                        }
+
+                        def currentColor = bgState[0].trim()
+                        def targetColor  = bgState[1].trim()
+
+                        if (!(currentColor in ['blue', 'green']) ||
+                            !(targetColor in ['blue', 'green']) ||
+                            currentColor == targetColor) {
+                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
+                        }
+
                         def services = [
                             'user-service',
                             'product-service',
@@ -777,22 +841,22 @@ pipeline {
                                 sh """
                                     set -e
 
-                                    echo "HPA target: ${service}-${env.TARGET_COLOR}"
+                                    echo "HPA target: ${service}-${targetColor}"
 
                                     kubectl patch hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${env.TARGET_COLOR}"}}}'
+                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${targetColor}"}}}'
                                 """
                             }
 
-                            echo "All HPAs now target ${env.TARGET_COLOR}."
+                            echo "All HPAs now target ${targetColor}."
 
                         }
                         catch (Exception e) {
 
                             echo "HPA update failed."
-                            echo "Rolling traffic back to ${env.CURRENT_COLOR}."
+                            echo "Rolling traffic back to ${currentColor}."
 
                             services.each { service ->
 
@@ -800,13 +864,13 @@ pipeline {
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${currentColor}"}}}' \
                                         || true
 
                                     kubectl patch hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${env.CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${currentColor}"}}}' \
                                         || true
                                 """
                             }
@@ -830,6 +894,21 @@ pipeline {
                      credentialsId: 'aws-terraform-user']
                 ]) {
                     script {
+
+                        def bgState = readFile('.bg-state').trim().split('\n')
+
+                        if (bgState.size() < 2) {
+                            error "Blue/Green state file is missing or invalid."
+                        }
+
+                        def currentColor = bgState[0].trim()
+                        def targetColor  = bgState[1].trim()
+
+                        if (!(currentColor in ['blue', 'green']) ||
+                            !(targetColor in ['blue', 'green']) ||
+                            currentColor == targetColor) {
+                            error "Invalid Blue/Green state: current=${currentColor}, target=${targetColor}"
+                        }
 
                         def services = [
                             'user-service',
@@ -856,11 +935,11 @@ pipeline {
                                         -o jsonpath='{.spec.selector.version}')
 
                                     echo "Service selector: \\\$ACTIVE_COLOR"
-                                    echo "Expected color:   ${env.TARGET_COLOR}"
+                                    echo "Expected color:   ${targetColor}"
 
-                                    if [ "\\\$ACTIVE_COLOR" != "${env.TARGET_COLOR}" ]; then
+                                    if [ "\\\$ACTIVE_COLOR" != "${targetColor}" ]; then
                                         echo "ERROR: ${service}-bg is pointing to \\\$ACTIVE_COLOR"
-                                        echo "Expected ${env.TARGET_COLOR}"
+                                        echo "Expected ${targetColor}"
                                         exit 1
                                     fi
 
@@ -868,28 +947,28 @@ pipeline {
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.spec.scaleTargetRef.name}')
 
-                                    EXPECTED_HPA_TARGET="${service}-${env.TARGET_COLOR}"
+                                    EXPECTED_HPA_TARGET="${service}-${targetColor}"
 
                                     echo "HPA target:       \\\$HPA_TARGET"
                                     echo "Expected target:  \\\$EXPECTED_HPA_TARGET"
 
                                     if [ "\\\$HPA_TARGET" != "\\\$EXPECTED_HPA_TARGET" ]; then
                                         echo "ERROR: ${service}-hpa is targeting \\\$HPA_TARGET"
-                                        echo "Expected \\\$EXPECTED_HPA_TARGET"
+                                        echo "Expected \\\\$EXPECTED_HPA_TARGET"
                                         exit 1
                                     fi
 
                                     kubectl get deployment \
-                                        ${service}-${env.TARGET_COLOR} \
+                                        ${service}-${targetColor} \
                                         -n ${NAMESPACE}
 
                                     READY_REPLICAS=\\\$(kubectl get deployment \
-                                        ${service}-${env.TARGET_COLOR} \
+                                        ${service}-${targetColor} \
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.status.readyReplicas}')
 
                                     DESIRED_REPLICAS=\\\$(kubectl get deployment \
-                                        ${service}-${env.TARGET_COLOR} \
+                                        ${service}-${targetColor} \
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.spec.replicas}')
 
@@ -897,12 +976,12 @@ pipeline {
                                     echo "Desired replicas: \\\$DESIRED_REPLICAS"
 
                                     if [ -z "\\\$READY_REPLICAS" ]; then
-                                        echo "ERROR: ${service}-${env.TARGET_COLOR} has no ready replicas"
+                                        echo "ERROR: ${service}-${targetColor} has no ready replicas"
                                         exit 1
                                     fi
 
                                     if [ "\\\$READY_REPLICAS" -lt "\\\$DESIRED_REPLICAS" ]; then
-                                        echo "ERROR: ${service}-${env.TARGET_COLOR} does not have all desired replicas ready"
+                                        echo "ERROR: ${service}-${targetColor} does not have all desired replicas ready"
                                         exit 1
                                     fi
 
@@ -914,10 +993,10 @@ pipeline {
                             echo "======================================"
                             echo "ALL BLUE/GREEN VERIFICATIONS PASSED"
                             echo "======================================"
-                            echo "Production color: ${env.TARGET_COLOR}"
-                            echo "All Services point to ${env.TARGET_COLOR}"
-                            echo "All HPAs target ${env.TARGET_COLOR} deployments"
-                            echo "All ${env.TARGET_COLOR} deployments are ready"
+                            echo "Production color: ${targetColor}"
+                            echo "All Services point to ${targetColor}"
+                            echo "All HPAs target ${targetColor} deployments"
+                            echo "All ${targetColor} deployments are ready"
                             echo "======================================"
 
                         }
@@ -925,7 +1004,7 @@ pipeline {
 
                             echo "======================================"
                             echo "POST-DEPLOYMENT VERIFICATION FAILED"
-                            echo "ROLLING BACK TO ${env.CURRENT_COLOR}"
+                            echo "ROLLING BACK TO ${currentColor}"
                             echo "======================================"
 
                             services.each { service ->
@@ -934,13 +1013,13 @@ pipeline {
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${currentColor}"}}}' \
                                         || true
 
                                     kubectl patch hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${env.CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${currentColor}"}}}' \
                                         || true
                                 """
                             }
@@ -1182,10 +1261,21 @@ pipeline {
     post {
 
         success {
-            echo '======================================'
-            echo 'Project 3 Jenkins Pipeline SUCCESS'
-            echo "Production color: ${env.TARGET_COLOR}"
-            echo '======================================'
+            script {
+                def productionColor = sh(
+                    script: """
+                        kubectl get service user-service-bg \
+                            -n ${NAMESPACE} \
+                            -o jsonpath='{.spec.selector.version}'
+                    """,
+                    returnStdout: true
+                ).trim()
+
+                echo '======================================'
+                echo 'Project 3 Jenkins Pipeline SUCCESS'
+                echo "Production color: ${productionColor}"
+                echo '======================================'
+            }
         }
 
         failure {
