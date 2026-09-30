@@ -178,6 +178,17 @@ pipeline {
                             -auto-approve \
                             -var="vpc_id=$VPC_ID"
 
+                        echo "===== Reading EKS Security Group ID ====="
+
+                        EKS_SG_ID=$(terraform output -raw cluster_security_group_id)
+
+                        if [ -z "$EKS_SG_ID" ]; then
+                            echo "ERROR: EKS security group ID was not returned by Terraform."
+                            exit 1
+                        fi
+
+                        echo "Active EKS Security Group: $EKS_SG_ID"
+
                         cd ../..
 
                         # ==================================================
@@ -186,17 +197,20 @@ pipeline {
 
                         echo "===== Terraform Plan: RDS ====="
                         echo "Using VPC: $VPC_ID"
+                        echo "Using EKS Security Group: $EKS_SG_ID"
 
                         cd terraform/rds
 
                         terraform plan \
-                            -var="vpc_id=$VPC_ID"
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
 
                         echo "===== Terraform Apply: RDS ====="
 
                         terraform apply \
                             -auto-approve \
-                            -var="vpc_id=$VPC_ID"
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
 
                         cd ../..
 
@@ -206,25 +220,29 @@ pipeline {
 
                         echo "===== Terraform Plan: Redis ====="
                         echo "Using VPC: $VPC_ID"
+                        echo "Using EKS Security Group: $EKS_SG_ID"
 
                         cd terraform/redis
 
                         terraform plan \
-                            -var="vpc_id=$VPC_ID"
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
 
                         echo "===== Terraform Apply: Redis ====="
 
                         terraform apply \
                             -auto-approve \
-                            -var="vpc_id=$VPC_ID"
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
 
                         cd ../..
 
                         echo "======================================"
                         echo " Terraform Infrastructure SUCCESS"
                         echo "======================================"
-                        echo "VPC ID : $VPC_ID"
-                        echo "EKS    : ecommerce-eks"
+                        echo "VPC ID        : $VPC_ID"
+                        echo "EKS SG ID     : $EKS_SG_ID"
+                        echo "EKS           : ecommerce-eks"
                         echo "======================================"
                     '''
                 }
@@ -424,10 +442,6 @@ pipeline {
 
                         echo "===== Preparing Blue/Green Deployments ====="
 
-                        # Create Blue/Green deployments only if missing.
-                        # Existing deployments are preserved so that
-                        # their current image/version is not overwritten.
-
                         kubectl get deployment user-service-blue \
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/user-service-blue.yaml
@@ -435,7 +449,6 @@ pipeline {
                         kubectl get deployment user-service-green \
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/user-service-green.yaml
-
 
                         kubectl get deployment product-service-blue \
                             -n $NAMESPACE >/dev/null 2>&1 || \
@@ -445,7 +458,6 @@ pipeline {
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/product-service-green.yaml
 
-
                         kubectl get deployment cart-service-blue \
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/cart-service-blue.yaml
@@ -453,7 +465,6 @@ pipeline {
                         kubectl get deployment cart-service-green \
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/cart-service-green.yaml
-
 
                         kubectl get deployment order-service-blue \
                             -n $NAMESPACE >/dev/null 2>&1 || \
@@ -463,7 +474,6 @@ pipeline {
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/order-service-green.yaml
 
-
                         kubectl get deployment payment-service-blue \
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/payment-service-blue.yaml
@@ -471,7 +481,6 @@ pipeline {
                         kubectl get deployment payment-service-green \
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/payment-service-green.yaml
-
 
                         kubectl get deployment inventory-service-blue \
                             -n $NAMESPACE >/dev/null 2>&1 || \
@@ -481,13 +490,7 @@ pipeline {
                             -n $NAMESPACE >/dev/null 2>&1 || \
                             kubectl apply -f k8s/inventory-service-green.yaml
 
-
                         echo "===== Preparing BG Services ====="
-
-                        # IMPORTANT:
-                        # BG Service YAML files contain version: blue.
-                        # Therefore, do NOT apply them on every build.
-                        # Only create them if they do not already exist.
 
                         kubectl get service user-service-bg \
                             -n $NAMESPACE >/dev/null 2>&1 || \
@@ -841,10 +844,6 @@ pipeline {
                                     echo "Verifying ${service}"
                                     echo "======================================"
 
-                                    # --------------------------------------
-                                    # Verify Service selector
-                                    # --------------------------------------
-
                                     ACTIVE_COLOR=\\\$(kubectl get service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.spec.selector.version}')
@@ -857,10 +856,6 @@ pipeline {
                                         echo "Expected ${TARGET_COLOR}"
                                         exit 1
                                     fi
-
-                                    # --------------------------------------
-                                    # Verify HPA target
-                                    # --------------------------------------
 
                                     HPA_TARGET=\\\$(kubectl get hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
@@ -877,17 +872,9 @@ pipeline {
                                         exit 1
                                     fi
 
-                                    # --------------------------------------
-                                    # Verify target Deployment
-                                    # --------------------------------------
-
                                     kubectl get deployment \
                                         ${service}-${TARGET_COLOR} \
                                         -n ${NAMESPACE}
-
-                                    # --------------------------------------
-                                    # Verify ready replicas
-                                    # --------------------------------------
 
                                     READY_REPLICAS=\\\$(kubectl get deployment \
                                         ${service}-${TARGET_COLOR} \

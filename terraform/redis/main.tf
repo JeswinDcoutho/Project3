@@ -45,7 +45,7 @@ resource "aws_security_group" "redis" {
     from_port       = 6379
     to_port         = 6379
     protocol        = "tcp"
-    security_groups = ["sg-0391d7a0910ec6b66"]
+    security_groups = [var.eks_security_group_id]
   }
 
   egress {
