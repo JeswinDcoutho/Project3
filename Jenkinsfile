@@ -185,13 +185,18 @@ pipeline {
                         # ==================================================
 
                         echo "===== Terraform Plan: RDS ====="
+                        echo "Using VPC: $VPC_ID"
 
                         cd terraform/rds
-                        terraform plan
+
+                        terraform plan \
+                            -var="vpc_id=$VPC_ID"
 
                         echo "===== Terraform Apply: RDS ====="
 
-                        terraform apply -auto-approve
+                        terraform apply \
+                            -auto-approve \
+                            -var="vpc_id=$VPC_ID"
 
                         cd ../..
 
@@ -200,13 +205,18 @@ pipeline {
                         # ==================================================
 
                         echo "===== Terraform Plan: Redis ====="
+                        echo "Using VPC: $VPC_ID"
 
                         cd terraform/redis
-                        terraform plan
+
+                        terraform plan \
+                            -var="vpc_id=$VPC_ID"
 
                         echo "===== Terraform Apply: Redis ====="
 
-                        terraform apply -auto-approve
+                        terraform apply \
+                            -auto-approve \
+                            -var="vpc_id=$VPC_ID"
 
                         cd ../..
 
