@@ -11,7 +11,7 @@ pipeline {
         // Jenkins build number is used as Docker image tag.
         IMAGE_TAG = "${BUILD_NUMBER}"
 
-        // These are calculated during the pipeline.
+        // Calculated during the pipeline.
         CURRENT_COLOR = ''
         TARGET_COLOR  = ''
     }
@@ -536,33 +536,40 @@ pipeline {
                     script {
 
                         def currentColor = sh(
-                            script: """
+                            script: '''
+                                set +e
+
                                 kubectl get service user-service-bg \
-                                    -n ${NAMESPACE} \
+                                    -n nodejs-devops \
                                     -o jsonpath='{.spec.selector.version}' \
-                                    2>/dev/null || true
-                            """,
+                                    2>/dev/null
+
+                                exit 0
+                            ''',
                             returnStdout: true
                         ).trim()
 
-                        if (currentColor != 'blue' &&
-                            currentColor != 'green') {
+                        if (!currentColor) {
 
-                            echo "No valid active color detected."
-                            echo "Using BLUE as initial production color."
+                            echo "No active color detected."
+                            echo "Using BLUE as the initial production color."
 
                             env.CURRENT_COLOR = 'blue'
                             env.TARGET_COLOR  = 'green'
 
+                        } else if (currentColor == 'blue') {
+
+                            env.CURRENT_COLOR = 'blue'
+                            env.TARGET_COLOR  = 'green'
+
+                        } else if (currentColor == 'green') {
+
+                            env.CURRENT_COLOR = 'green'
+                            env.TARGET_COLOR  = 'blue'
+
                         } else {
 
-                            env.CURRENT_COLOR = currentColor
-
-                            if (currentColor == 'blue') {
-                                env.TARGET_COLOR = 'green'
-                            } else {
-                                env.TARGET_COLOR = 'blue'
-                            }
+                            error "Invalid service selector color detected: ${currentColor}"
                         }
 
                         echo "======================================"
@@ -604,10 +611,10 @@ pipeline {
                             sh """
                                 set -e
 
-                                echo "Updating ${service}-${TARGET_COLOR}"
+                                echo "Updating ${service}-${env.TARGET_COLOR}"
 
                                 kubectl set image \
-                                    deployment/${service}-${TARGET_COLOR} \
+                                    deployment/${service}-${env.TARGET_COLOR} \
                                     ${service}=${ECR_REGISTRY}/ecommerce-${service}:${IMAGE_TAG} \
                                     -n ${NAMESPACE}
                             """
@@ -646,10 +653,10 @@ pipeline {
                                 sh """
                                     set -e
 
-                                    echo "Waiting for ${service}-${TARGET_COLOR}"
+                                    echo "Waiting for ${service}-${env.TARGET_COLOR}"
 
                                     kubectl rollout status \
-                                        deployment/${service}-${TARGET_COLOR} \
+                                        deployment/${service}-${env.TARGET_COLOR} \
                                         -n ${NAMESPACE} \
                                         --timeout=300s
                                 """
@@ -657,7 +664,7 @@ pipeline {
 
                             echo "======================================"
                             echo "TARGET DEPLOYMENTS ARE HEALTHY"
-                            echo "Target color: ${TARGET_COLOR}"
+                            echo "Target color: ${env.TARGET_COLOR}"
                             echo "======================================"
 
                         }
@@ -665,7 +672,7 @@ pipeline {
 
                             echo "======================================"
                             echo "TARGET DEPLOYMENT FAILED"
-                            echo "Keeping production on ${CURRENT_COLOR}"
+                            echo "Keeping production on ${env.CURRENT_COLOR}"
                             echo "======================================"
 
                             currentBuild.result = 'FAILURE'
@@ -706,22 +713,22 @@ pipeline {
                                 sh """
                                     set -e
 
-                                    echo "Switching ${service}-bg to ${TARGET_COLOR}"
+                                    echo "Switching ${service}-bg to ${env.TARGET_COLOR}"
 
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${TARGET_COLOR}"}}}'
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.TARGET_COLOR}"}}}'
                                 """
                             }
 
-                            echo "Traffic switched to ${TARGET_COLOR}."
+                            echo "Traffic switched to ${env.TARGET_COLOR}."
 
                         }
                         catch (Exception e) {
 
                             echo "Traffic switch failed."
-                            echo "Rolling back to ${CURRENT_COLOR}."
+                            echo "Rolling back to ${env.CURRENT_COLOR}."
 
                             services.each { service ->
 
@@ -729,7 +736,7 @@ pipeline {
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.CURRENT_COLOR}"}}}' \
                                         || true
                                 """
                             }
@@ -770,22 +777,22 @@ pipeline {
                                 sh """
                                     set -e
 
-                                    echo "HPA target: ${service}-${TARGET_COLOR}"
+                                    echo "HPA target: ${service}-${env.TARGET_COLOR}"
 
                                     kubectl patch hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${TARGET_COLOR}"}}}'
+                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${env.TARGET_COLOR}"}}}'
                                 """
                             }
 
-                            echo "All HPAs now target ${TARGET_COLOR}."
+                            echo "All HPAs now target ${env.TARGET_COLOR}."
 
                         }
                         catch (Exception e) {
 
                             echo "HPA update failed."
-                            echo "Rolling traffic back to ${CURRENT_COLOR}."
+                            echo "Rolling traffic back to ${env.CURRENT_COLOR}."
 
                             services.each { service ->
 
@@ -793,13 +800,13 @@ pipeline {
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.CURRENT_COLOR}"}}}' \
                                         || true
 
                                     kubectl patch hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${env.CURRENT_COLOR}"}}}' \
                                         || true
                                 """
                             }
@@ -849,11 +856,11 @@ pipeline {
                                         -o jsonpath='{.spec.selector.version}')
 
                                     echo "Service selector: \\\$ACTIVE_COLOR"
-                                    echo "Expected color:   ${TARGET_COLOR}"
+                                    echo "Expected color:   ${env.TARGET_COLOR}"
 
-                                    if [ "\\\$ACTIVE_COLOR" != "${TARGET_COLOR}" ]; then
+                                    if [ "\\\$ACTIVE_COLOR" != "${env.TARGET_COLOR}" ]; then
                                         echo "ERROR: ${service}-bg is pointing to \\\$ACTIVE_COLOR"
-                                        echo "Expected ${TARGET_COLOR}"
+                                        echo "Expected ${env.TARGET_COLOR}"
                                         exit 1
                                     fi
 
@@ -861,7 +868,7 @@ pipeline {
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.spec.scaleTargetRef.name}')
 
-                                    EXPECTED_HPA_TARGET="${service}-${TARGET_COLOR}"
+                                    EXPECTED_HPA_TARGET="${service}-${env.TARGET_COLOR}"
 
                                     echo "HPA target:       \\\$HPA_TARGET"
                                     echo "Expected target:  \\\$EXPECTED_HPA_TARGET"
@@ -873,16 +880,16 @@ pipeline {
                                     fi
 
                                     kubectl get deployment \
-                                        ${service}-${TARGET_COLOR} \
+                                        ${service}-${env.TARGET_COLOR} \
                                         -n ${NAMESPACE}
 
                                     READY_REPLICAS=\\\$(kubectl get deployment \
-                                        ${service}-${TARGET_COLOR} \
+                                        ${service}-${env.TARGET_COLOR} \
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.status.readyReplicas}')
 
                                     DESIRED_REPLICAS=\\\$(kubectl get deployment \
-                                        ${service}-${TARGET_COLOR} \
+                                        ${service}-${env.TARGET_COLOR} \
                                         -n ${NAMESPACE} \
                                         -o jsonpath='{.spec.replicas}')
 
@@ -890,12 +897,12 @@ pipeline {
                                     echo "Desired replicas: \\\$DESIRED_REPLICAS"
 
                                     if [ -z "\\\$READY_REPLICAS" ]; then
-                                        echo "ERROR: ${service}-${TARGET_COLOR} has no ready replicas"
+                                        echo "ERROR: ${service}-${env.TARGET_COLOR} has no ready replicas"
                                         exit 1
                                     fi
 
                                     if [ "\\\$READY_REPLICAS" -lt "\\\$DESIRED_REPLICAS" ]; then
-                                        echo "ERROR: ${service}-${TARGET_COLOR} does not have all desired replicas ready"
+                                        echo "ERROR: ${service}-${env.TARGET_COLOR} does not have all desired replicas ready"
                                         exit 1
                                     fi
 
@@ -907,10 +914,10 @@ pipeline {
                             echo "======================================"
                             echo "ALL BLUE/GREEN VERIFICATIONS PASSED"
                             echo "======================================"
-                            echo "Production color: ${TARGET_COLOR}"
-                            echo "All Services point to ${TARGET_COLOR}"
-                            echo "All HPAs target ${TARGET_COLOR} deployments"
-                            echo "All ${TARGET_COLOR} deployments are ready"
+                            echo "Production color: ${env.TARGET_COLOR}"
+                            echo "All Services point to ${env.TARGET_COLOR}"
+                            echo "All HPAs target ${env.TARGET_COLOR} deployments"
+                            echo "All ${env.TARGET_COLOR} deployments are ready"
                             echo "======================================"
 
                         }
@@ -918,7 +925,7 @@ pipeline {
 
                             echo "======================================"
                             echo "POST-DEPLOYMENT VERIFICATION FAILED"
-                            echo "ROLLING BACK TO ${CURRENT_COLOR}"
+                            echo "ROLLING BACK TO ${env.CURRENT_COLOR}"
                             echo "======================================"
 
                             services.each { service ->
@@ -927,13 +934,13 @@ pipeline {
                                     kubectl patch service ${service}-bg \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"selector":{"app":"${service}","version":"${CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"selector":{"app":"${service}","version":"${env.CURRENT_COLOR}"}}}' \
                                         || true
 
                                     kubectl patch hpa ${service}-hpa \
                                         -n ${NAMESPACE} \
                                         --type=merge \
-                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${CURRENT_COLOR}"}}}' \
+                                        -p='{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${service}-${env.CURRENT_COLOR}"}}}' \
                                         || true
                                 """
                             }
@@ -1177,7 +1184,7 @@ pipeline {
         success {
             echo '======================================'
             echo 'Project 3 Jenkins Pipeline SUCCESS'
-            echo "Production color: ${TARGET_COLOR}"
+            echo "Production color: ${env.TARGET_COLOR}"
             echo '======================================'
         }
 
