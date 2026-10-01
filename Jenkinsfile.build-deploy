@@ -5,7 +5,6 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
-
         timeout(time: 45, unit: 'MINUTES')
     }
 
@@ -13,11 +12,11 @@ pipeline {
         AWS_DEFAULT_REGION = 'ap-south-1'
         AWS_REGION         = 'ap-south-1'
 
-        AWS_ACCOUNT_ID     = '777000838263'
-        ECR_REGISTRY       = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+        AWS_ACCOUNT_ID = '777000838263'
+        ECR_REGISTRY   = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
 
-        EKS_CLUSTER        = 'ecommerce-eks'
-        NAMESPACE          = 'nodejs-devops'
+        EKS_CLUSTER = 'ecommerce-eks'
+        NAMESPACE   = 'nodejs-devops'
 
         USER_REPOSITORY      = 'ecommerce-user-service'
         PRODUCT_REPOSITORY   = 'ecommerce-product-service'
@@ -26,40 +25,93 @@ pipeline {
         PAYMENT_REPOSITORY   = 'ecommerce-payment-service'
         INVENTORY_REPOSITORY = 'ecommerce-inventory-service'
 
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        USER_IMAGE_TAG      = ''
+        PRODUCT_IMAGE_TAG   = ''
+        CART_IMAGE_TAG      = ''
+        ORDER_IMAGE_TAG     = ''
+        PAYMENT_IMAGE_TAG   = ''
+        INVENTORY_IMAGE_TAG = ''
+
+        USER_IMAGE_EXISTS      = 'false'
+        PRODUCT_IMAGE_EXISTS   = 'false'
+        CART_IMAGE_EXISTS      = 'false'
+        ORDER_IMAGE_EXISTS     = 'false'
+        PAYMENT_IMAGE_EXISTS   = 'false'
+        INVENTORY_IMAGE_EXISTS = 'false'
+
+        CURRENT_COLOR = ''
+        TARGET_COLOR  = ''
     }
 
     stages {
 
-        // ============================================================
-        // CHECKOUT
-        // ============================================================
-
         stage('Checkout') {
             steps {
                 checkout scm
+
+                script {
+                    env.USER_IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=12 HEAD:user-service',
+                        returnStdout: true
+                    ).trim()
+
+                    env.PRODUCT_IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=12 HEAD:product-service',
+                        returnStdout: true
+                    ).trim()
+
+                    env.CART_IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=12 HEAD:cart-service',
+                        returnStdout: true
+                    ).trim()
+
+                    env.ORDER_IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=12 HEAD:order-service',
+                        returnStdout: true
+                    ).trim()
+
+                    env.PAYMENT_IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=12 HEAD:payment-service',
+                        returnStdout: true
+                    ).trim()
+
+                    env.INVENTORY_IMAGE_TAG = sh(
+                        script: 'git rev-parse --short=12 HEAD:inventory-service',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "=============================================="
+                    echo "Docker Image Tags"
+                    echo "=============================================="
+                    echo "user-service      : ${env.USER_IMAGE_TAG}"
+                    echo "product-service   : ${env.PRODUCT_IMAGE_TAG}"
+                    echo "cart-service      : ${env.CART_IMAGE_TAG}"
+                    echo "order-service     : ${env.ORDER_IMAGE_TAG}"
+                    echo "payment-service   : ${env.PAYMENT_IMAGE_TAG}"
+                    echo "inventory-service : ${env.INVENTORY_IMAGE_TAG}"
+                    echo "=============================================="
+                }
             }
         }
-
-        // ============================================================
-        // BUILD INFORMATION
-        // ============================================================
 
         stage('Build Information') {
             steps {
-                echo "=============================================="
-                echo "Jenkins Build Number : ${BUILD_NUMBER}"
-                echo "Docker Image Tag     : ${BUILD_NUMBER}"
-                echo "AWS Region           : ${AWS_REGION}"
-                echo "EKS Cluster          : ${EKS_CLUSTER}"
-                echo "Namespace            : ${NAMESPACE}"
-                echo "=============================================="
+                script {
+                    def commitShort = sh(
+                        script: 'git rev-parse --short=12 HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "=============================================="
+                    echo "Jenkins Build Number : ${BUILD_NUMBER}"
+                    echo "Git Commit           : ${commitShort}"
+                    echo "AWS Region           : ${AWS_REGION}"
+                    echo "EKS Cluster          : ${EKS_CLUSTER}"
+                    echo "Namespace            : ${NAMESPACE}"
+                    echo "=============================================="
+                }
             }
         }
-
-        // ============================================================
-        // AWS LOGIN
-        // ============================================================
 
         stage('AWS Login') {
             steps {
@@ -91,80 +143,219 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // BUILD DOCKER IMAGES
-        // ============================================================
+        stage('Check Existing ECR Images') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
+
+                        env.USER_IMAGE_EXISTS = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "$USER_REPOSITORY" \
+                                    --image-ids imageTag="$USER_IMAGE_TAG" \
+                                    --region "$AWS_REGION" \
+                                    >/dev/null 2>&1
+                            ''',
+                            returnStatus: true
+                        ) == 0 ? 'true' : 'false'
+
+                        env.PRODUCT_IMAGE_EXISTS = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "$PRODUCT_REPOSITORY" \
+                                    --image-ids imageTag="$PRODUCT_IMAGE_TAG" \
+                                    --region "$AWS_REGION" \
+                                    >/dev/null 2>&1
+                            ''',
+                            returnStatus: true
+                        ) == 0 ? 'true' : 'false'
+
+                        env.CART_IMAGE_EXISTS = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "$CART_REPOSITORY" \
+                                    --image-ids imageTag="$CART_IMAGE_TAG" \
+                                    --region "$AWS_REGION" \
+                                    >/dev/null 2>&1
+                            ''',
+                            returnStatus: true
+                        ) == 0 ? 'true' : 'false'
+
+                        env.ORDER_IMAGE_EXISTS = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "$ORDER_REPOSITORY" \
+                                    --image-ids imageTag="$ORDER_IMAGE_TAG" \
+                                    --region "$AWS_REGION" \
+                                    >/dev/null 2>&1
+                            ''',
+                            returnStatus: true
+                        ) == 0 ? 'true' : 'false'
+
+                        env.PAYMENT_IMAGE_EXISTS = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "$PAYMENT_REPOSITORY" \
+                                    --image-ids imageTag="$PAYMENT_IMAGE_TAG" \
+                                    --region "$AWS_REGION" \
+                                    >/dev/null 2>&1
+                            ''',
+                            returnStatus: true
+                        ) == 0 ? 'true' : 'false'
+
+                        env.INVENTORY_IMAGE_EXISTS = sh(
+                            script: '''
+                                aws ecr describe-images \
+                                    --repository-name "$INVENTORY_REPOSITORY" \
+                                    --image-ids imageTag="$INVENTORY_IMAGE_TAG" \
+                                    --region "$AWS_REGION" \
+                                    >/dev/null 2>&1
+                            ''',
+                            returnStatus: true
+                        ) == 0 ? 'true' : 'false'
+
+                        echo "=============================================="
+                        echo "Existing ECR Images"
+                        echo "=============================================="
+                        echo "user-service      : ${env.USER_IMAGE_EXISTS}"
+                        echo "product-service   : ${env.PRODUCT_IMAGE_EXISTS}"
+                        echo "cart-service      : ${env.CART_IMAGE_EXISTS}"
+                        echo "order-service     : ${env.ORDER_IMAGE_EXISTS}"
+                        echo "payment-service   : ${env.PAYMENT_IMAGE_EXISTS}"
+                        echo "inventory-service : ${env.INVENTORY_IMAGE_EXISTS}"
+                        echo "=============================================="
+                    }
+                }
+            }
+        }
 
         stage('Build Docker Images') {
             parallel {
 
                 stage('Build user-service') {
+                    when {
+                        expression {
+                            env.USER_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
                     steps {
                         sh '''
                             set -e
 
+                            echo "Building user-service..."
+                            echo "Tag: $USER_IMAGE_TAG"
+
                             docker build \
-                                -t "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG" \
                                 user-service
                         '''
                     }
                 }
 
                 stage('Build product-service') {
+                    when {
+                        expression {
+                            env.PRODUCT_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
                     steps {
                         sh '''
                             set -e
 
+                            echo "Building product-service..."
+                            echo "Tag: $PRODUCT_IMAGE_TAG"
+
                             docker build \
-                                -t "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$PRODUCT_IMAGE_TAG" \
                                 product-service
                         '''
                     }
                 }
 
                 stage('Build cart-service') {
+                    when {
+                        expression {
+                            env.CART_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
                     steps {
                         sh '''
                             set -e
 
+                            echo "Building cart-service..."
+                            echo "Tag: $CART_IMAGE_TAG"
+
                             docker build \
-                                -t "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$CART_REPOSITORY:$CART_IMAGE_TAG" \
                                 cart-service
                         '''
                     }
                 }
 
                 stage('Build order-service') {
+                    when {
+                        expression {
+                            env.ORDER_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
                     steps {
                         sh '''
                             set -e
 
+                            echo "Building order-service..."
+                            echo "Tag: $ORDER_IMAGE_TAG"
+
                             docker build \
-                                -t "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$ORDER_REPOSITORY:$ORDER_IMAGE_TAG" \
                                 order-service
                         '''
                     }
                 }
 
                 stage('Build payment-service') {
+                    when {
+                        expression {
+                            env.PAYMENT_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
                     steps {
                         sh '''
                             set -e
 
+                            echo "Building payment-service..."
+                            echo "Tag: $PAYMENT_IMAGE_TAG"
+
                             docker build \
-                                -t "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$PAYMENT_IMAGE_TAG" \
                                 payment-service
                         '''
                     }
                 }
 
                 stage('Build inventory-service') {
+                    when {
+                        expression {
+                            env.INVENTORY_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
                     steps {
                         sh '''
                             set -e
 
+                            echo "Building inventory-service..."
+                            echo "Tag: $INVENTORY_IMAGE_TAG"
+
                             docker build \
-                                -t "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$INVENTORY_IMAGE_TAG" \
                                 inventory-service
                         '''
                     }
@@ -172,40 +363,112 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // PUSH DOCKER IMAGES
-        // ============================================================
-
         stage('Push Docker Images') {
-            steps {
-                sh '''
-                    set -e
+            parallel {
 
-                    docker push \
-                        "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG"
+                stage('Push user-service') {
+                    when {
+                        expression {
+                            env.USER_IMAGE_EXISTS != 'true'
+                        }
+                    }
 
-                    docker push \
-                        "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG"
+                    steps {
+                        sh '''
+                            set -e
 
-                    docker push \
-                        "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG"
+                            docker push \
+                                "$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG"
+                        '''
+                    }
+                }
 
-                    docker push \
-                        "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG"
+                stage('Push product-service') {
+                    when {
+                        expression {
+                            env.PRODUCT_IMAGE_EXISTS != 'true'
+                        }
+                    }
 
-                    docker push \
-                        "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG"
+                    steps {
+                        sh '''
+                            set -e
 
-                    docker push \
-                        "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG"
-                '''
+                            docker push \
+                                "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$PRODUCT_IMAGE_TAG"
+                        '''
+                    }
+                }
+
+                stage('Push cart-service') {
+                    when {
+                        expression {
+                            env.CART_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker push \
+                                "$ECR_REGISTRY/$CART_REPOSITORY:$CART_IMAGE_TAG"
+                        '''
+                    }
+                }
+
+                stage('Push order-service') {
+                    when {
+                        expression {
+                            env.ORDER_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker push \
+                                "$ECR_REGISTRY/$ORDER_REPOSITORY:$ORDER_IMAGE_TAG"
+                        '''
+                    }
+                }
+
+                stage('Push payment-service') {
+                    when {
+                        expression {
+                            env.PAYMENT_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker push \
+                                "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$PAYMENT_IMAGE_TAG"
+                        '''
+                    }
+                }
+
+                stage('Push inventory-service') {
+                    when {
+                        expression {
+                            env.INVENTORY_IMAGE_EXISTS != 'true'
+                        }
+                    }
+
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker push \
+                                "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$INVENTORY_IMAGE_TAG"
+                        '''
+                    }
+                }
             }
         }
-
-        // ============================================================
-        // VERIFY ECR IMAGES
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
 
         stage('Verify ECR Images') {
             steps {
@@ -216,56 +479,47 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Verifying images with tag: $IMAGE_TAG"
-
                         aws ecr describe-images \
                             --repository-name "$USER_REPOSITORY" \
-                            --image-ids imageTag="$IMAGE_TAG" \
+                            --image-ids imageTag="$USER_IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$PRODUCT_REPOSITORY" \
-                            --image-ids imageTag="$IMAGE_TAG" \
+                            --image-ids imageTag="$PRODUCT_IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$CART_REPOSITORY" \
-                            --image-ids imageTag="$IMAGE_TAG" \
+                            --image-ids imageTag="$CART_IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$ORDER_REPOSITORY" \
-                            --image-ids imageTag="$IMAGE_TAG" \
+                            --image-ids imageTag="$ORDER_IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$PAYMENT_REPOSITORY" \
-                            --image-ids imageTag="$IMAGE_TAG" \
+                            --image-ids imageTag="$PAYMENT_IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$INVENTORY_REPOSITORY" \
-                            --image-ids imageTag="$IMAGE_TAG" \
+                            --image-ids imageTag="$INVENTORY_IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
-                        echo "All six images verified in ECR."
+                        echo "All six required images are available in ECR."
                     '''
                 }
             }
         }
-
-        // ============================================================
-        // CREATE / UPDATE KUBERNETES DB SECRET
-        // AWS CREDENTIALS REQUIRED
-        // RDS PASSWORD IS JENKINS SECRET
-        // ============================================================
 
         stage('Create Kubernetes DB Secret') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
                      credentialsId: 'aws-terraform-user'],
-
                     string(
                         credentialsId: 'rds-db-password',
                         variable: 'RDS_DB_PASSWORD'
@@ -288,11 +542,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // VERIFY KUBERNETES CLUSTER
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Verify Kubernetes Cluster') {
             steps {
                 withCredentials([
@@ -302,30 +551,19 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Checking EKS cluster..."
                         aws eks describe-cluster \
                             --name "$EKS_CLUSTER" \
                             --region "$AWS_REGION" \
                             --query 'cluster.status' \
                             --output text
 
-                        echo "Checking Kubernetes cluster..."
                         kubectl cluster-info
-
-                        echo "Checking nodes..."
                         kubectl get nodes
-
-                        echo "Checking namespace..."
                         kubectl get namespace "$NAMESPACE"
                     '''
                 }
             }
         }
-
-        // ============================================================
-        // DEPLOY NORMAL ROLLINGUPDATE SERVICES
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
 
         stage('Deploy RollingUpdate Services') {
             parallel {
@@ -345,7 +583,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/product-service \
-                                    product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
+                                    product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$PRODUCT_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -372,7 +610,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/cart-service \
-                                    cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
+                                    cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$CART_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -399,7 +637,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/order-service \
-                                    order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
+                                    order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$ORDER_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -426,7 +664,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/payment-service \
-                                    payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
+                                    payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$PAYMENT_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -453,7 +691,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/inventory-service \
-                                    inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
+                                    inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$INVENTORY_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -466,11 +704,6 @@ pipeline {
                 }
             }
         }
-
-        // ============================================================
-        // APPLY STABLE SERVICES
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
 
         stage('Apply Stable Services') {
             steps {
@@ -493,20 +726,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // ENSURE USER BLUE/GREEN SERVICE EXISTS
-        //
-        // IMPORTANT:
-        // We only apply the manifest if the Service does not exist.
-        //
-        // This prevents:
-        //     Green active
-        //        ↓
-        //     kubectl apply user-service-bg-service.yaml
-        //        ↓
-        //     selector accidentally reset to Blue
-        // ============================================================
-
         stage('Ensure User Blue Green Service') {
             steps {
                 withCredentials([
@@ -521,15 +740,11 @@ pipeline {
                         then
                             echo "user-service-bg already exists."
                         else
-                            echo "user-service-bg does not exist."
-                            echo "Creating initial Blue/Green Service..."
-
                             kubectl apply \
                                 -f k8s/user-service-bg-service.yaml \
                                 -n "$NAMESPACE"
                         fi
 
-                        echo "Current user-service-bg selector:"
                         kubectl get service user-service-bg \
                             -n "$NAMESPACE" \
                             -o jsonpath='{.spec.selector}'
@@ -540,11 +755,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // DETERMINE ACTIVE USER COLOR
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Determine Active User Color') {
             steps {
                 withCredentials([
@@ -552,6 +762,7 @@ pipeline {
                      credentialsId: 'aws-terraform-user']
                 ]) {
                     script {
+
                         def activeColor = sh(
                             script: '''
                                 set +e
@@ -584,11 +795,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // PREPARE USER BLUE/GREEN TARGET
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Prepare User Blue Green Target') {
             steps {
                 withCredentials([
@@ -608,7 +814,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/user-service-blue \
-                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl scale deployment/user-service-blue \
@@ -627,7 +833,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/user-service-green \
-                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl scale deployment/user-service-green \
@@ -639,11 +845,6 @@ pipeline {
                 }
             }
         }
-
-        // ============================================================
-        // WAIT FOR USER TARGET ROLLOUT
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
 
         stage('Wait For User Target Rollout') {
             steps {
@@ -669,11 +870,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // VERIFY USER TARGET PODS
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Verify User Target Pods') {
             steps {
                 withCredentials([
@@ -686,8 +882,6 @@ pipeline {
 
                         sh """
                             set -e
-
-                            echo "Target color: ${targetColor}"
 
                             kubectl get deployment \
                                 user-service-${targetColor} \
@@ -714,11 +908,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // SWITCH USER TRAFFIC
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Switch User Traffic') {
             steps {
                 withCredentials([
@@ -743,11 +932,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // UPDATE HPA TARGET
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Update HPA Target') {
             steps {
                 withCredentials([
@@ -756,11 +940,8 @@ pipeline {
                 ]) {
                     script {
 
-                        def targetColor =
-                            env.TARGET_COLOR
-
-                        def targetDeployment =
-                            "user-service-${targetColor}"
+                        def targetColor = env.TARGET_COLOR
+                        def targetDeployment = "user-service-${targetColor}"
 
                         sh """
                             set -e
@@ -785,11 +966,6 @@ pipeline {
             }
         }
 
-        // ============================================================
-        // VERIFY USER SERVICE TRAFFIC
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
-
         stage('Verify User Service Traffic') {
             steps {
                 withCredentials([
@@ -798,13 +974,10 @@ pipeline {
                 ]) {
                     script {
 
-                        def targetColor =
-                            env.TARGET_COLOR
+                        def targetColor = env.TARGET_COLOR
 
                         sh """
                             set -e
-
-                            echo "Service selector:"
 
                             kubectl get service user-service-bg \
                                 -n "\$NAMESPACE" \
@@ -812,14 +985,10 @@ pipeline {
 
                             echo
 
-                            echo "Target pods:"
-
                             kubectl get pods \
                                 -n "\$NAMESPACE" \
                                 -l app=user-service,version=${targetColor} \
                                 -o wide
-
-                            echo "Endpoints:"
 
                             kubectl get endpoints user-service-bg \
                                 -n "\$NAMESPACE"
@@ -828,11 +997,6 @@ pipeline {
                 }
             }
         }
-
-        // ============================================================
-        // DEACTIVATE OLD USER COLOR
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
 
         stage('Deactivate Old User Color') {
             steps {
@@ -850,8 +1014,6 @@ pipeline {
                                 kubectl scale deployment/user-service-blue \
                                     --replicas=0 \
                                     -n "$NAMESPACE"
-
-                                echo "Blue deployment scaled to 0."
                             '''
 
                         } else if (env.CURRENT_COLOR == 'green') {
@@ -862,8 +1024,6 @@ pipeline {
                                 kubectl scale deployment/user-service-green \
                                     --replicas=0 \
                                     -n "$NAMESPACE"
-
-                                echo "Green deployment scaled to 0."
                             '''
 
                         } else {
@@ -874,11 +1034,6 @@ pipeline {
                 }
             }
         }
-
-        // ============================================================
-        // FINAL DEPLOYMENT VERIFICATION
-        // AWS CREDENTIALS REQUIRED
-        // ============================================================
 
         stage('Final Deployment Verification') {
             steps {
@@ -927,30 +1082,41 @@ pipeline {
                             -o jsonpath='{.spec.selector}'
 
                         echo
+
+                        echo "=============================================="
+                        echo "Running Image Versions"
+                        echo "=============================================="
+
+                        kubectl get deployments \
+                            -n "$NAMESPACE" \
+                            -o custom-columns='NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image'
                     '''
                 }
             }
         }
     }
 
-    // ================================================================
-    // POST ACTIONS
-    // ================================================================
-
     post {
 
         success {
             echo "=============================================="
             echo "BUILD + DEPLOY SUCCESSFUL"
-            echo "Build number : ${BUILD_NUMBER}"
-            echo "Image tag    : ${BUILD_NUMBER}"
+            echo "=============================================="
+            echo "Jenkins build number     : ${BUILD_NUMBER}"
+            echo "user-service image       : ${USER_IMAGE_TAG}"
+            echo "product-service image    : ${PRODUCT_IMAGE_TAG}"
+            echo "cart-service image       : ${CART_IMAGE_TAG}"
+            echo "order-service image      : ${ORDER_IMAGE_TAG}"
+            echo "payment-service image    : ${PAYMENT_IMAGE_TAG}"
+            echo "inventory-service image  : ${INVENTORY_IMAGE_TAG}"
             echo "=============================================="
         }
 
         failure {
             echo "=============================================="
             echo "BUILD + DEPLOY FAILED"
-            echo "Build number : ${BUILD_NUMBER}"
+            echo "=============================================="
+            echo "Jenkins build number : ${BUILD_NUMBER}"
             echo "=============================================="
         }
 
