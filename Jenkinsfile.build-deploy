@@ -33,9 +33,6 @@ pipeline {
         ORDER_IMAGE_EXISTS     = 'false'
         PAYMENT_IMAGE_EXISTS   = 'false'
         INVENTORY_IMAGE_EXISTS = 'false'
-
-        CURRENT_COLOR = ''
-        TARGET_COLOR  = ''
     }
 
     stages {
@@ -788,7 +785,7 @@ pipeline {
                                 kubectl scale deployment/user-service-green \
                                     --replicas=1 \
                                     -n "$NAMESPACE"
-                            }
+                            '''
                         }
                     }
                 }
