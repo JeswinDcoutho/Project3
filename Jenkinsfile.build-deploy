@@ -25,12 +25,7 @@ pipeline {
         PAYMENT_REPOSITORY   = 'ecommerce-payment-service'
         INVENTORY_REPOSITORY = 'ecommerce-inventory-service'
 
-        USER_IMAGE_TAG      = ''
-        PRODUCT_IMAGE_TAG   = ''
-        CART_IMAGE_TAG      = ''
-        ORDER_IMAGE_TAG     = ''
-        PAYMENT_IMAGE_TAG   = ''
-        INVENTORY_IMAGE_TAG = ''
+        IMAGE_TAG = "${BUILD_NUMBER}"
 
         USER_IMAGE_EXISTS      = 'false'
         PRODUCT_IMAGE_EXISTS   = 'false'
@@ -49,48 +44,10 @@ pipeline {
             steps {
                 checkout scm
 
-                script {
-                    env.USER_IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD:user-service',
-                        returnStdout: true
-                    ).trim()
-
-                    env.PRODUCT_IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD:product-service',
-                        returnStdout: true
-                    ).trim()
-
-                    env.CART_IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD:cart-service',
-                        returnStdout: true
-                    ).trim()
-
-                    env.ORDER_IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD:order-service',
-                        returnStdout: true
-                    ).trim()
-
-                    env.PAYMENT_IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD:payment-service',
-                        returnStdout: true
-                    ).trim()
-
-                    env.INVENTORY_IMAGE_TAG = sh(
-                        script: 'git rev-parse --short=12 HEAD:inventory-service',
-                        returnStdout: true
-                    ).trim()
-
-                    echo "=============================================="
-                    echo "Docker Image Tags"
-                    echo "=============================================="
-                    echo "user-service      : ${env.USER_IMAGE_TAG}"
-                    echo "product-service   : ${env.PRODUCT_IMAGE_TAG}"
-                    echo "cart-service      : ${env.CART_IMAGE_TAG}"
-                    echo "order-service     : ${env.ORDER_IMAGE_TAG}"
-                    echo "payment-service   : ${env.PAYMENT_IMAGE_TAG}"
-                    echo "inventory-service : ${env.INVENTORY_IMAGE_TAG}"
-                    echo "=============================================="
-                }
+                echo "=============================================="
+                echo "Build Number : ${BUILD_NUMBER}"
+                echo "Image Tag    : ${IMAGE_TAG}"
+                echo "=============================================="
             }
         }
 
@@ -104,6 +61,7 @@ pipeline {
 
                     echo "=============================================="
                     echo "Jenkins Build Number : ${BUILD_NUMBER}"
+                    echo "Docker Image Tag     : ${IMAGE_TAG}"
                     echo "Git Commit           : ${commitShort}"
                     echo "AWS Region           : ${AWS_REGION}"
                     echo "EKS Cluster          : ${EKS_CLUSTER}"
@@ -155,7 +113,7 @@ pipeline {
                             script: '''
                                 aws ecr describe-images \
                                     --repository-name "$USER_REPOSITORY" \
-                                    --image-ids imageTag="$USER_IMAGE_TAG" \
+                                    --image-ids imageTag="$IMAGE_TAG" \
                                     --region "$AWS_REGION" \
                                     >/dev/null 2>&1
                             ''',
@@ -166,7 +124,7 @@ pipeline {
                             script: '''
                                 aws ecr describe-images \
                                     --repository-name "$PRODUCT_REPOSITORY" \
-                                    --image-ids imageTag="$PRODUCT_IMAGE_TAG" \
+                                    --image-ids imageTag="$IMAGE_TAG" \
                                     --region "$AWS_REGION" \
                                     >/dev/null 2>&1
                             ''',
@@ -177,7 +135,7 @@ pipeline {
                             script: '''
                                 aws ecr describe-images \
                                     --repository-name "$CART_REPOSITORY" \
-                                    --image-ids imageTag="$CART_IMAGE_TAG" \
+                                    --image-ids imageTag="$IMAGE_TAG" \
                                     --region "$AWS_REGION" \
                                     >/dev/null 2>&1
                             ''',
@@ -188,7 +146,7 @@ pipeline {
                             script: '''
                                 aws ecr describe-images \
                                     --repository-name "$ORDER_REPOSITORY" \
-                                    --image-ids imageTag="$ORDER_IMAGE_TAG" \
+                                    --image-ids imageTag="$IMAGE_TAG" \
                                     --region "$AWS_REGION" \
                                     >/dev/null 2>&1
                             ''',
@@ -199,7 +157,7 @@ pipeline {
                             script: '''
                                 aws ecr describe-images \
                                     --repository-name "$PAYMENT_REPOSITORY" \
-                                    --image-ids imageTag="$PAYMENT_IMAGE_TAG" \
+                                    --image-ids imageTag="$IMAGE_TAG" \
                                     --region "$AWS_REGION" \
                                     >/dev/null 2>&1
                             ''',
@@ -210,7 +168,7 @@ pipeline {
                             script: '''
                                 aws ecr describe-images \
                                     --repository-name "$INVENTORY_REPOSITORY" \
-                                    --image-ids imageTag="$INVENTORY_IMAGE_TAG" \
+                                    --image-ids imageTag="$IMAGE_TAG" \
                                     --region "$AWS_REGION" \
                                     >/dev/null 2>&1
                             ''',
@@ -220,6 +178,7 @@ pipeline {
                         echo "=============================================="
                         echo "Existing ECR Images"
                         echo "=============================================="
+                        echo "Image Tag         : ${IMAGE_TAG}"
                         echo "user-service      : ${env.USER_IMAGE_EXISTS}"
                         echo "product-service   : ${env.PRODUCT_IMAGE_EXISTS}"
                         echo "cart-service      : ${env.CART_IMAGE_EXISTS}"
@@ -241,16 +200,15 @@ pipeline {
                             env.USER_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             echo "Building user-service..."
-                            echo "Tag: $USER_IMAGE_TAG"
+                            echo "Tag: $IMAGE_TAG"
 
                             docker build \
-                                -t "$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
                                 user-service
                         '''
                     }
@@ -262,16 +220,15 @@ pipeline {
                             env.PRODUCT_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             echo "Building product-service..."
-                            echo "Tag: $PRODUCT_IMAGE_TAG"
+                            echo "Tag: $IMAGE_TAG"
 
                             docker build \
-                                -t "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$PRODUCT_IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
                                 product-service
                         '''
                     }
@@ -283,16 +240,15 @@ pipeline {
                             env.CART_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             echo "Building cart-service..."
-                            echo "Tag: $CART_IMAGE_TAG"
+                            echo "Tag: $IMAGE_TAG"
 
                             docker build \
-                                -t "$ECR_REGISTRY/$CART_REPOSITORY:$CART_IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
                                 cart-service
                         '''
                     }
@@ -304,16 +260,15 @@ pipeline {
                             env.ORDER_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             echo "Building order-service..."
-                            echo "Tag: $ORDER_IMAGE_TAG"
+                            echo "Tag: $IMAGE_TAG"
 
                             docker build \
-                                -t "$ECR_REGISTRY/$ORDER_REPOSITORY:$ORDER_IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
                                 order-service
                         '''
                     }
@@ -325,16 +280,15 @@ pipeline {
                             env.PAYMENT_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             echo "Building payment-service..."
-                            echo "Tag: $PAYMENT_IMAGE_TAG"
+                            echo "Tag: $IMAGE_TAG"
 
                             docker build \
-                                -t "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$PAYMENT_IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
                                 payment-service
                         '''
                     }
@@ -346,16 +300,15 @@ pipeline {
                             env.INVENTORY_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             echo "Building inventory-service..."
-                            echo "Tag: $INVENTORY_IMAGE_TAG"
+                            echo "Tag: $IMAGE_TAG"
 
                             docker build \
-                                -t "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$INVENTORY_IMAGE_TAG" \
+                                -t "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
                                 inventory-service
                         '''
                     }
@@ -372,13 +325,12 @@ pipeline {
                             env.USER_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             docker push \
-                                "$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG"
+                                "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG"
                         '''
                     }
                 }
@@ -389,13 +341,12 @@ pipeline {
                             env.PRODUCT_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             docker push \
-                                "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$PRODUCT_IMAGE_TAG"
+                                "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG"
                         '''
                     }
                 }
@@ -406,13 +357,12 @@ pipeline {
                             env.CART_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             docker push \
-                                "$ECR_REGISTRY/$CART_REPOSITORY:$CART_IMAGE_TAG"
+                                "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG"
                         '''
                     }
                 }
@@ -423,13 +373,12 @@ pipeline {
                             env.ORDER_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             docker push \
-                                "$ECR_REGISTRY/$ORDER_REPOSITORY:$ORDER_IMAGE_TAG"
+                                "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG"
                         '''
                     }
                 }
@@ -440,13 +389,12 @@ pipeline {
                             env.PAYMENT_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             docker push \
-                                "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$PAYMENT_IMAGE_TAG"
+                                "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG"
                         '''
                     }
                 }
@@ -457,13 +405,12 @@ pipeline {
                             env.INVENTORY_IMAGE_EXISTS != 'true'
                         }
                     }
-
                     steps {
                         sh '''
                             set -e
 
                             docker push \
-                                "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$INVENTORY_IMAGE_TAG"
+                                "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG"
                         '''
                     }
                 }
@@ -481,32 +428,32 @@ pipeline {
 
                         aws ecr describe-images \
                             --repository-name "$USER_REPOSITORY" \
-                            --image-ids imageTag="$USER_IMAGE_TAG" \
+                            --image-ids imageTag="$IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$PRODUCT_REPOSITORY" \
-                            --image-ids imageTag="$PRODUCT_IMAGE_TAG" \
+                            --image-ids imageTag="$IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$CART_REPOSITORY" \
-                            --image-ids imageTag="$CART_IMAGE_TAG" \
+                            --image-ids imageTag="$IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$ORDER_REPOSITORY" \
-                            --image-ids imageTag="$ORDER_IMAGE_TAG" \
+                            --image-ids imageTag="$IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$PAYMENT_REPOSITORY" \
-                            --image-ids imageTag="$PAYMENT_IMAGE_TAG" \
+                            --image-ids imageTag="$IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         aws ecr describe-images \
                             --repository-name "$INVENTORY_REPOSITORY" \
-                            --image-ids imageTag="$INVENTORY_IMAGE_TAG" \
+                            --image-ids imageTag="$IMAGE_TAG" \
                             --region "$AWS_REGION" >/dev/null
 
                         echo "All six required images are available in ECR."
@@ -558,7 +505,9 @@ pipeline {
                             --output text
 
                         kubectl cluster-info
+
                         kubectl get nodes
+
                         kubectl get namespace "$NAMESPACE"
                     '''
                 }
@@ -583,7 +532,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/product-service \
-                                    product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$PRODUCT_IMAGE_TAG" \
+                                    product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -610,7 +559,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/cart-service \
-                                    cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$CART_IMAGE_TAG" \
+                                    cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -637,7 +586,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/order-service \
-                                    order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$ORDER_IMAGE_TAG" \
+                                    order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -664,7 +613,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/payment-service \
-                                    payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$PAYMENT_IMAGE_TAG" \
+                                    payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -691,7 +640,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/inventory-service \
-                                    inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$INVENTORY_IMAGE_TAG" \
+                                    inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl rollout status \
@@ -814,7 +763,7 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/user-service-blue \
-                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG" \
+                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl scale deployment/user-service-blue \
@@ -833,13 +782,13 @@ pipeline {
 
                                 kubectl set image \
                                     deployment/user-service-green \
-                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$USER_IMAGE_TAG" \
+                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
                                     -n "$NAMESPACE"
 
                                 kubectl scale deployment/user-service-green \
                                     --replicas=1 \
                                     -n "$NAMESPACE"
-                            '''
+                            }
                         }
                     }
                 }
@@ -1097,18 +1046,12 @@ pipeline {
     }
 
     post {
-
         success {
             echo "=============================================="
             echo "BUILD + DEPLOY SUCCESSFUL"
             echo "=============================================="
-            echo "Jenkins build number     : ${BUILD_NUMBER}"
-            echo "user-service image       : ${USER_IMAGE_TAG}"
-            echo "product-service image    : ${PRODUCT_IMAGE_TAG}"
-            echo "cart-service image       : ${CART_IMAGE_TAG}"
-            echo "order-service image      : ${ORDER_IMAGE_TAG}"
-            echo "payment-service image    : ${PAYMENT_IMAGE_TAG}"
-            echo "inventory-service image  : ${INVENTORY_IMAGE_TAG}"
+            echo "Jenkins build number : ${BUILD_NUMBER}"
+            echo "Docker image tag     : ${IMAGE_TAG}"
             echo "=============================================="
         }
 
@@ -1117,6 +1060,7 @@ pipeline {
             echo "BUILD + DEPLOY FAILED"
             echo "=============================================="
             echo "Jenkins build number : ${BUILD_NUMBER}"
+            echo "Docker image tag     : ${IMAGE_TAG}"
             echo "=============================================="
         }
 
