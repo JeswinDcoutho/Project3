@@ -42,7 +42,7 @@ pipeline {
         }
 
         // ============================================================
-        // SHOW BUILD INFORMATION
+        // BUILD INFORMATION
         // ============================================================
 
         stage('Build Information') {
@@ -58,7 +58,7 @@ pipeline {
         }
 
         // ============================================================
-        // AWS / ECR LOGIN
+        // AWS LOGIN
         // ============================================================
 
         stage('AWS Login') {
@@ -70,24 +70,29 @@ pipeline {
                     sh '''
                         set -e
 
+                        echo "Checking AWS identity..."
                         aws sts get-caller-identity
 
+                        echo "Updating kubeconfig..."
                         aws eks update-kubeconfig \
                             --region "$AWS_REGION" \
                             --name "$EKS_CLUSTER"
 
+                        echo "Logging Docker into ECR..."
                         aws ecr get-login-password \
                             --region "$AWS_REGION" |
                         docker login \
                             --username AWS \
                             --password-stdin "$ECR_REGISTRY"
+
+                        echo "AWS authentication successful."
                     '''
                 }
             }
         }
 
         // ============================================================
-        // BUILD IMAGES
+        // BUILD DOCKER IMAGES
         // ============================================================
 
         stage('Build Docker Images') {
@@ -168,7 +173,7 @@ pipeline {
         }
 
         // ============================================================
-        // PUSH IMAGES
+        // PUSH DOCKER IMAGES
         // ============================================================
 
         stage('Push Docker Images') {
@@ -199,63 +204,68 @@ pipeline {
 
         // ============================================================
         // VERIFY ECR IMAGES
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Verify ECR Images') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    echo "Verifying images with tag: $IMAGE_TAG"
+                        echo "Verifying images with tag: $IMAGE_TAG"
 
-                    aws ecr describe-images \
-                        --repository-name "$USER_REPOSITORY" \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        >/dev/null
+                        aws ecr describe-images \
+                            --repository-name "$USER_REPOSITORY" \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" >/dev/null
 
-                    aws ecr describe-images \
-                        --repository-name "$PRODUCT_REPOSITORY" \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        >/dev/null
+                        aws ecr describe-images \
+                            --repository-name "$PRODUCT_REPOSITORY" \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" >/dev/null
 
-                    aws ecr describe-images \
-                        --repository-name "$CART_REPOSITORY" \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        >/dev/null
+                        aws ecr describe-images \
+                            --repository-name "$CART_REPOSITORY" \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" >/dev/null
 
-                    aws ecr describe-images \
-                        --repository-name "$ORDER_REPOSITORY" \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        >/dev/null
+                        aws ecr describe-images \
+                            --repository-name "$ORDER_REPOSITORY" \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" >/dev/null
 
-                    aws ecr describe-images \
-                        --repository-name "$PAYMENT_REPOSITORY" \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        >/dev/null
+                        aws ecr describe-images \
+                            --repository-name "$PAYMENT_REPOSITORY" \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" >/dev/null
 
-                    aws ecr describe-images \
-                        --repository-name "$INVENTORY_REPOSITORY" \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        >/dev/null
+                        aws ecr describe-images \
+                            --repository-name "$INVENTORY_REPOSITORY" \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" >/dev/null
 
-                    echo "All six images verified in ECR."
-                '''
+                        echo "All six images verified in ECR."
+                    '''
+                }
             }
         }
 
         // ============================================================
-        // CREATE / UPDATE DB SECRET
+        // CREATE / UPDATE KUBERNETES DB SECRET
+        // AWS CREDENTIALS REQUIRED
+        // RDS PASSWORD IS JENKINS SECRET
         // ============================================================
 
         stage('Create Kubernetes DB Secret') {
             steps {
                 withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user'],
+
                     string(
                         credentialsId: 'rds-db-password',
                         variable: 'RDS_DB_PASSWORD'
@@ -279,25 +289,42 @@ pipeline {
         }
 
         // ============================================================
-        // VERIFY CLUSTER
+        // VERIFY KUBERNETES CLUSTER
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Verify Kubernetes Cluster') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    kubectl cluster-info
+                        echo "Checking EKS cluster..."
+                        aws eks describe-cluster \
+                            --name "$EKS_CLUSTER" \
+                            --region "$AWS_REGION" \
+                            --query 'cluster.status' \
+                            --output text
 
-                    kubectl get nodes
+                        echo "Checking Kubernetes cluster..."
+                        kubectl cluster-info
 
-                    kubectl get namespace "$NAMESPACE"
-                '''
+                        echo "Checking nodes..."
+                        kubectl get nodes
+
+                        echo "Checking namespace..."
+                        kubectl get namespace "$NAMESPACE"
+                    '''
+                }
             }
         }
 
         // ============================================================
-        // NORMAL ROLLINGUPDATE SERVICES
+        // DEPLOY NORMAL ROLLINGUPDATE SERVICES
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Deploy RollingUpdate Services') {
@@ -305,476 +332,610 @@ pipeline {
 
                 stage('Deploy product-service') {
                     steps {
-                        sh '''
-                            set -e
+                        withCredentials([
+                            [$class: 'AmazonWebServicesCredentialsBinding',
+                             credentialsId: 'aws-terraform-user']
+                        ]) {
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/product-service-deployment.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/product-service-deployment.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/product-service \
-                                product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/product-service \
+                                    product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl rollout status \
-                                deployment/product-service \
-                                -n "$NAMESPACE" \
-                                --timeout=5m
-                        '''
+                                kubectl rollout status \
+                                    deployment/product-service \
+                                    -n "$NAMESPACE" \
+                                    --timeout=5m
+                            '''
+                        }
                     }
                 }
 
                 stage('Deploy cart-service') {
                     steps {
-                        sh '''
-                            set -e
+                        withCredentials([
+                            [$class: 'AmazonWebServicesCredentialsBinding',
+                             credentialsId: 'aws-terraform-user']
+                        ]) {
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/cart-service-deployment.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/cart-service-deployment.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/cart-service \
-                                cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/cart-service \
+                                    cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl rollout status \
-                                deployment/cart-service \
-                                -n "$NAMESPACE" \
-                                --timeout=5m
-                        '''
+                                kubectl rollout status \
+                                    deployment/cart-service \
+                                    -n "$NAMESPACE" \
+                                    --timeout=5m
+                            '''
+                        }
                     }
                 }
 
                 stage('Deploy order-service') {
                     steps {
-                        sh '''
-                            set -e
+                        withCredentials([
+                            [$class: 'AmazonWebServicesCredentialsBinding',
+                             credentialsId: 'aws-terraform-user']
+                        ]) {
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/order-service-deployment.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/order-service-deployment.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/order-service \
-                                order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/order-service \
+                                    order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl rollout status \
-                                deployment/order-service \
-                                -n "$NAMESPACE" \
-                                --timeout=5m
-                        '''
+                                kubectl rollout status \
+                                    deployment/order-service \
+                                    -n "$NAMESPACE" \
+                                    --timeout=5m
+                            '''
+                        }
                     }
                 }
 
                 stage('Deploy payment-service') {
                     steps {
-                        sh '''
-                            set -e
+                        withCredentials([
+                            [$class: 'AmazonWebServicesCredentialsBinding',
+                             credentialsId: 'aws-terraform-user']
+                        ]) {
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/payment-service-deployment.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/payment-service-deployment.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/payment-service \
-                                payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/payment-service \
+                                    payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl rollout status \
-                                deployment/payment-service \
-                                -n "$NAMESPACE" \
-                                --timeout=5m
-                        '''
+                                kubectl rollout status \
+                                    deployment/payment-service \
+                                    -n "$NAMESPACE" \
+                                    --timeout=5m
+                            '''
+                        }
                     }
                 }
 
                 stage('Deploy inventory-service') {
                     steps {
-                        sh '''
-                            set -e
+                        withCredentials([
+                            [$class: 'AmazonWebServicesCredentialsBinding',
+                             credentialsId: 'aws-terraform-user']
+                        ]) {
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/inventory-service-deployment.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/inventory-service-deployment.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/inventory-service \
-                                inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/inventory-service \
+                                    inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl rollout status \
-                                deployment/inventory-service \
-                                -n "$NAMESPACE" \
-                                --timeout=5m
-                        '''
+                                kubectl rollout status \
+                                    deployment/inventory-service \
+                                    -n "$NAMESPACE" \
+                                    --timeout=5m
+                            '''
+                        }
                     }
                 }
             }
         }
 
         // ============================================================
-        // ENSURE STABLE SERVICES
+        // APPLY STABLE SERVICES
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Apply Stable Services') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    kubectl apply \
-                        -f k8s/product-service-bg-service.yaml \
-                        -f k8s/cart-service-bg-service.yaml \
-                        -f k8s/order-service-bg-service.yaml \
-                        -f k8s/payment-service-bg-service.yaml \
-                        -f k8s/inventory-service-bg-service.yaml \
-                        -n "$NAMESPACE"
-                '''
+                        kubectl apply \
+                            -f k8s/product-service-bg-service.yaml \
+                            -f k8s/cart-service-bg-service.yaml \
+                            -f k8s/order-service-bg-service.yaml \
+                            -f k8s/payment-service-bg-service.yaml \
+                            -f k8s/inventory-service-bg-service.yaml \
+                            -n "$NAMESPACE"
+                    '''
+                }
             }
         }
 
         // ============================================================
-        // DETERMINE CURRENT USER COLOR
+        // ENSURE USER BLUE/GREEN SERVICE EXISTS
+        //
+        // IMPORTANT:
+        // We only apply the manifest if the Service does not exist.
+        //
+        // This prevents:
+        //     Green active
+        //        ↓
+        //     kubectl apply user-service-bg-service.yaml
+        //        ↓
+        //     selector accidentally reset to Blue
+        // ============================================================
+
+        stage('Ensure User Blue Green Service') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
+
+                        if kubectl get service user-service-bg \
+                            -n "$NAMESPACE" >/dev/null 2>&1
+                        then
+                            echo "user-service-bg already exists."
+                        else
+                            echo "user-service-bg does not exist."
+                            echo "Creating initial Blue/Green Service..."
+
+                            kubectl apply \
+                                -f k8s/user-service-bg-service.yaml \
+                                -n "$NAMESPACE"
+                        fi
+
+                        echo "Current user-service-bg selector:"
+                        kubectl get service user-service-bg \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.selector}'
+
+                        echo
+                    '''
+                }
+            }
+        }
+
+        // ============================================================
+        // DETERMINE ACTIVE USER COLOR
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Determine Active User Color') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
+                        def activeColor = sh(
+                            script: '''
+                                set +e
 
-                    def activeColor = sh(
-                        script: '''
-                            set +e
+                                kubectl get service user-service-bg \
+                                    -n "$NAMESPACE" \
+                                    -o jsonpath='{.spec.selector.version}' \
+                                    2>/dev/null
+                            ''',
+                            returnStdout: true
+                        ).trim()
 
-                            kubectl get service user-service-bg \
-                                -n "$NAMESPACE" \
-                                -o jsonpath='{.spec.selector.version}' \
-                                2>/dev/null
+                        if (activeColor == 'blue') {
+                            env.CURRENT_COLOR = 'blue'
+                            env.TARGET_COLOR = 'green'
+                        }
+                        else if (activeColor == 'green') {
+                            env.CURRENT_COLOR = 'green'
+                            env.TARGET_COLOR = 'blue'
+                        }
+                        else {
+                            env.CURRENT_COLOR = 'none'
+                            env.TARGET_COLOR = 'blue'
+                        }
 
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    if (activeColor == 'blue') {
-                        env.CURRENT_COLOR = 'blue'
-                        env.TARGET_COLOR = 'green'
+                        echo "Current user-service color: ${env.CURRENT_COLOR}"
+                        echo "Target user-service color : ${env.TARGET_COLOR}"
                     }
-                    else if (activeColor == 'green') {
-                        env.CURRENT_COLOR = 'green'
-                        env.TARGET_COLOR = 'blue'
-                    }
-                    else {
-                        /*
-                         * Bootstrap case.
-                         *
-                         * user-service-bg already points to blue
-                         * in the current manifest.
-                         */
-                        env.CURRENT_COLOR = 'none'
-                        env.TARGET_COLOR = 'blue'
-                    }
-
-                    echo "Current user-service color: ${env.CURRENT_COLOR}"
-                    echo "Target user-service color : ${env.TARGET_COLOR}"
                 }
             }
         }
 
         // ============================================================
-        // PREPARE BLUE/GREEN TARGET
+        // PREPARE USER BLUE/GREEN TARGET
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Prepare User Blue Green Target') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    if (env.TARGET_COLOR == 'blue') {
+                        if (env.TARGET_COLOR == 'blue') {
 
-                        sh '''
-                            set -e
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/user-service-blue.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/user-service-blue.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/user-service-blue \
-                                user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/user-service-blue \
+                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl scale deployment/user-service-blue \
-                                --replicas=1 \
-                                -n "$NAMESPACE"
-                        '''
+                                kubectl scale deployment/user-service-blue \
+                                    --replicas=1 \
+                                    -n "$NAMESPACE"
+                            '''
 
-                    } else {
+                        } else {
 
-                        sh '''
-                            set -e
+                            sh '''
+                                set -e
 
-                            kubectl apply \
-                                -f k8s/user-service-green.yaml \
-                                -n "$NAMESPACE"
+                                kubectl apply \
+                                    -f k8s/user-service-green.yaml \
+                                    -n "$NAMESPACE"
 
-                            kubectl set image \
-                                deployment/user-service-green \
-                                user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
-                                -n "$NAMESPACE"
+                                kubectl set image \
+                                    deployment/user-service-green \
+                                    user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                    -n "$NAMESPACE"
 
-                            kubectl scale deployment/user-service-green \
-                                --replicas=1 \
-                                -n "$NAMESPACE"
-                        '''
+                                kubectl scale deployment/user-service-green \
+                                    --replicas=1 \
+                                    -n "$NAMESPACE"
+                            '''
+                        }
                     }
                 }
             }
         }
 
         // ============================================================
-        // WAIT FOR TARGET COLOR
+        // WAIT FOR USER TARGET ROLLOUT
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Wait For User Target Rollout') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    def targetDeployment =
-                        "user-service-${env.TARGET_COLOR}"
+                        def targetDeployment =
+                            "user-service-${env.TARGET_COLOR}"
 
-                    sh """
-                        set -e
+                        sh """
+                            set -e
 
-                        kubectl rollout status \
-                            deployment/${targetDeployment} \
-                            -n "\$NAMESPACE" \
-                            --timeout=5m
-                    """
+                            kubectl rollout status \
+                                deployment/${targetDeployment} \
+                                -n "\$NAMESPACE" \
+                                --timeout=5m
+                        """
+                    }
                 }
             }
         }
 
         // ============================================================
-        // VERIFY TARGET PODS
+        // VERIFY USER TARGET PODS
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Verify User Target Pods') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    def targetColor = env.TARGET_COLOR
+                        def targetColor = env.TARGET_COLOR
 
-                    sh """
-                        set -e
+                        sh """
+                            set -e
 
-                        echo "Target color: ${targetColor}"
+                            echo "Target color: ${targetColor}"
 
-                        kubectl get deployment \
-                            user-service-${targetColor} \
-                            -n "\$NAMESPACE"
+                            kubectl get deployment \
+                                user-service-${targetColor} \
+                                -n "\$NAMESPACE"
 
-                        kubectl get pods \
-                            -n "\$NAMESPACE" \
-                            -l app=user-service,version=${targetColor}
+                            kubectl get pods \
+                                -n "\$NAMESPACE" \
+                                -l app=user-service,version=${targetColor}
 
-                        READY=\$(kubectl get deployment \
-                            user-service-${targetColor} \
-                            -n "\$NAMESPACE" \
-                            -o jsonpath='{.status.readyReplicas}')
+                            READY=\$(kubectl get deployment \
+                                user-service-${targetColor} \
+                                -n "\$NAMESPACE" \
+                                -o jsonpath='{.status.readyReplicas}')
 
-                        if [ -z "\$READY" ] || [ "\$READY" -lt 1 ]; then
-                            echo "Target deployment has no ready replicas."
-                            exit 1
-                        fi
+                            if [ -z "\$READY" ] || [ "\$READY" -lt 1 ]; then
+                                echo "Target deployment has no ready replicas."
+                                exit 1
+                            fi
 
-                        echo "Target deployment is ready with \$READY replica(s)."
-                    """
+                            echo "Target deployment is ready with \$READY replica(s)."
+                        """
+                    }
                 }
             }
         }
 
         // ============================================================
-        // SWITCH TRAFFIC
+        // SWITCH USER TRAFFIC
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Switch User Traffic') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    def targetColor = env.TARGET_COLOR
+                        def targetColor = env.TARGET_COLOR
 
-                    sh """
-                        set -e
+                        sh """
+                            set -e
 
-                        kubectl patch service user-service-bg \
-                            -n "\$NAMESPACE" \
-                            -p '{"spec":{"selector":{"app":"user-service","version":"${targetColor}"}}}'
+                            kubectl patch service user-service-bg \
+                                -n "\$NAMESPACE" \
+                                -p '{"spec":{"selector":{"app":"user-service","version":"${targetColor}"}}}'
 
-                        echo "Traffic switched to ${targetColor}."
-                    """
+                            echo "Traffic switched to ${targetColor}."
+                        """
+                    }
                 }
             }
         }
 
         // ============================================================
         // UPDATE HPA TARGET
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Update HPA Target') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    def targetColor = env.TARGET_COLOR
-                    def targetDeployment =
-                        "user-service-${targetColor}"
+                        def targetColor =
+                            env.TARGET_COLOR
 
-                    sh """
-                        set -e
+                        def targetDeployment =
+                            "user-service-${targetColor}"
 
-                        kubectl apply \
-                            -f k8s/user-service-hpa.yaml \
-                            -n "\$NAMESPACE"
-
-                        kubectl patch hpa user-service-hpa \
-                            -n "\$NAMESPACE" \
-                            --type='merge' \
-                            -p '{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${targetDeployment}"}}}'
-
-                        echo "HPA now targets ${targetDeployment}."
-
-                        kubectl get hpa \
-                            user-service-hpa \
-                            -n "\$NAMESPACE"
-                    """
-                }
-            }
-        }
-
-        // ============================================================
-        // VERIFY TRAFFIC
-        // ============================================================
-
-        stage('Verify User Service Traffic') {
-            steps {
-                script {
-
-                    def targetColor = env.TARGET_COLOR
-
-                    sh """
-                        set -e
-
-                        echo "Service selector:"
-                        kubectl get service user-service-bg \
-                            -n "\$NAMESPACE" \
-                            -o jsonpath='{.spec.selector}'
-
-                        echo
-
-                        echo "Target pods:"
-                        kubectl get pods \
-                            -n "\$NAMESPACE" \
-                            -l app=user-service,version=${targetColor} \
-                            -o wide
-
-                        echo "Endpoints:"
-                        kubectl get endpoints user-service-bg \
-                            -n "\$NAMESPACE"
-                    """
-                }
-            }
-        }
-
-        // ============================================================
-        // DEACTIVATE OLD COLOR
-        // ============================================================
-
-        stage('Deactivate Old User Color') {
-            steps {
-                script {
-
-                    if (env.CURRENT_COLOR == 'blue') {
-
-                        sh '''
+                        sh """
                             set -e
 
-                            kubectl scale deployment/user-service-blue \
-                                --replicas=0 \
-                                -n "$NAMESPACE"
+                            kubectl apply \
+                                -f k8s/user-service-hpa.yaml \
+                                -n "\$NAMESPACE"
 
-                            echo "Blue deployment scaled to 0."
-                        '''
+                            kubectl patch hpa user-service-hpa \
+                                -n "\$NAMESPACE" \
+                                --type='merge' \
+                                -p '{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${targetDeployment}"}}}'
 
-                    } else if (env.CURRENT_COLOR == 'green') {
+                            echo "HPA now targets ${targetDeployment}."
 
-                        sh '''
-                            set -e
-
-                            kubectl scale deployment/user-service-green \
-                                --replicas=0 \
-                                -n "$NAMESPACE"
-
-                            echo "Green deployment scaled to 0."
-                        '''
-
-                    } else {
-
-                        echo 'Bootstrap deployment: no previous active color to deactivate.'
+                            kubectl get hpa \
+                                user-service-hpa \
+                                -n "\$NAMESPACE"
+                        """
                     }
                 }
             }
         }
 
         // ============================================================
-        // FINAL STATE
+        // VERIFY USER SERVICE TRAFFIC
+        // AWS CREDENTIALS REQUIRED
+        // ============================================================
+
+        stage('Verify User Service Traffic') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
+
+                        def targetColor =
+                            env.TARGET_COLOR
+
+                        sh """
+                            set -e
+
+                            echo "Service selector:"
+
+                            kubectl get service user-service-bg \
+                                -n "\$NAMESPACE" \
+                                -o jsonpath='{.spec.selector}'
+
+                            echo
+
+                            echo "Target pods:"
+
+                            kubectl get pods \
+                                -n "\$NAMESPACE" \
+                                -l app=user-service,version=${targetColor} \
+                                -o wide
+
+                            echo "Endpoints:"
+
+                            kubectl get endpoints user-service-bg \
+                                -n "\$NAMESPACE"
+                        """
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // DEACTIVATE OLD USER COLOR
+        // AWS CREDENTIALS REQUIRED
+        // ============================================================
+
+        stage('Deactivate Old User Color') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
+
+                        if (env.CURRENT_COLOR == 'blue') {
+
+                            sh '''
+                                set -e
+
+                                kubectl scale deployment/user-service-blue \
+                                    --replicas=0 \
+                                    -n "$NAMESPACE"
+
+                                echo "Blue deployment scaled to 0."
+                            '''
+
+                        } else if (env.CURRENT_COLOR == 'green') {
+
+                            sh '''
+                                set -e
+
+                                kubectl scale deployment/user-service-green \
+                                    --replicas=0 \
+                                    -n "$NAMESPACE"
+
+                                echo "Green deployment scaled to 0."
+                            '''
+
+                        } else {
+
+                            echo 'Bootstrap deployment: no previous active color to deactivate.'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // FINAL DEPLOYMENT VERIFICATION
+        // AWS CREDENTIALS REQUIRED
         // ============================================================
 
         stage('Final Deployment Verification') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    echo "=============================================="
-                    echo "Deployments"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "Deployments"
+                        echo "=============================================="
 
-                    kubectl get deployments \
-                        -n "$NAMESPACE"
+                        kubectl get deployments \
+                            -n "$NAMESPACE"
 
-                    echo "=============================================="
-                    echo "Pods"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "Pods"
+                        echo "=============================================="
 
-                    kubectl get pods \
-                        -n "$NAMESPACE" \
-                        -o wide
+                        kubectl get pods \
+                            -n "$NAMESPACE" \
+                            -o wide
 
-                    echo "=============================================="
-                    echo "Services"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "Services"
+                        echo "=============================================="
 
-                    kubectl get services \
-                        -n "$NAMESPACE"
+                        kubectl get services \
+                            -n "$NAMESPACE"
 
-                    echo "=============================================="
-                    echo "User HPA"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "User HPA"
+                        echo "=============================================="
 
-                    kubectl get hpa \
-                        -n "$NAMESPACE"
+                        kubectl get hpa \
+                            -n "$NAMESPACE"
 
-                    echo "=============================================="
-                    echo "User Service Selector"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "User Service Selector"
+                        echo "=============================================="
 
-                    kubectl get service user-service-bg \
-                        -n "$NAMESPACE" \
-                        -o jsonpath='{.spec.selector}'
+                        kubectl get service user-service-bg \
+                            -n "$NAMESPACE" \
+                            -o jsonpath='{.spec.selector}'
 
-                    echo
-                '''
+                        echo
+                    '''
+                }
             }
         }
     }
+
+    // ================================================================
+    // POST ACTIONS
+    // ================================================================
 
     post {
 
@@ -796,7 +957,6 @@ pipeline {
         always {
             sh '''
                 docker logout "$ECR_REGISTRY" 2>/dev/null || true
-
                 docker image prune -f 2>/dev/null || true
             '''
         }
