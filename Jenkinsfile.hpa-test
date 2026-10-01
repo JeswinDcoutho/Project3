@@ -1,0 +1,662 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 20, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(
+            name: 'STRESS_SECONDS',
+            defaultValue: '180',
+            description: 'How long to generate CPU load. Allowed: 30-600 seconds.'
+        )
+
+        string(
+            name: 'CHECK_INTERVAL',
+            defaultValue: '15',
+            description: 'Seconds between HPA checks. Allowed: 5-60 seconds.'
+        )
+
+        string(
+            name: 'SCALE_DOWN_WAIT_SECONDS',
+            defaultValue: '420',
+            description: 'How long to watch for HPA scale-down after stress stops. Minimum 300 seconds.'
+        )
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_REGION         = 'ap-south-1'
+        EKS_CLUSTER        = 'ecommerce-eks'
+        NAMESPACE          = 'nodejs-devops'
+        HPA_NAME           = 'user-service-hpa'
+        USER_SERVICE       = 'user-service-bg'
+    }
+
+    stages {
+
+        stage('Connect To EKS') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "=============================================="
+                        echo "AWS / EKS CONNECTION"
+                        echo "=============================================="
+
+                        aws sts get-caller-identity
+
+                        aws eks update-kubeconfig \
+                            --region "$AWS_REGION" \
+                            --name "$EKS_CLUSTER"
+
+                        kubectl cluster-info
+                    '''
+                }
+            }
+        }
+
+        stage('Determine Active Color') {
+            steps {
+                script {
+                    def activeColor = sh(
+                        script: '''
+                            set -e
+
+                            kubectl get service "$USER_SERVICE" \
+                                -n "$NAMESPACE" \
+                                -o jsonpath='{.spec.selector.version}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!(activeColor in ['blue', 'green'])) {
+                        error(
+                            "Could not determine active user-service color. " +
+                            "Expected blue or green, got: '${activeColor}'"
+                        )
+                    }
+
+                    env.ACTIVE_COLOR = activeColor
+                    env.ACTIVE_DEPLOYMENT = "user-service-${activeColor}"
+
+                    echo "Active color      : ${env.ACTIVE_COLOR}"
+                    echo "Active deployment : ${env.ACTIVE_DEPLOYMENT}"
+                }
+            }
+        }
+
+        stage('Validate HPA Target') {
+            steps {
+                script {
+                    def hpaTarget = sh(
+                        script: '''
+                            set -e
+
+                            kubectl get hpa "$HPA_NAME" \
+                                -n "$NAMESPACE" \
+                                -o jsonpath='{.spec.scaleTargetRef.name}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "HPA target        : ${hpaTarget}"
+                    echo "Active deployment : ${env.ACTIVE_DEPLOYMENT}"
+
+                    if (hpaTarget != env.ACTIVE_DEPLOYMENT) {
+                        error(
+                            "HPA target mismatch. " +
+                            "HPA targets '${hpaTarget}', " +
+                            "but active deployment is '${env.ACTIVE_DEPLOYMENT}'."
+                        )
+                    }
+
+                    echo "HPA correctly targets the active deployment."
+                }
+            }
+        }
+
+        stage('Check HPA') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=============================================="
+                    echo "HPA CONFIGURATION"
+                    echo "=============================================="
+
+                    kubectl get hpa "$HPA_NAME" \
+                        -n "$NAMESPACE"
+
+                    echo
+                    kubectl describe hpa "$HPA_NAME" \
+                        -n "$NAMESPACE"
+                '''
+            }
+        }
+
+        stage('Check Metrics') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=============================================="
+                    echo "METRICS CHECK"
+                    echo "=============================================="
+
+                    echo "Node metrics:"
+                    kubectl top nodes
+
+                    echo
+                    echo "User-service pod metrics:"
+                    kubectl top pods \
+                        -n "$NAMESPACE" \
+                        -l app=user-service,version="$ACTIVE_COLOR"
+                '''
+            }
+        }
+
+        stage('Capture Baseline') {
+            steps {
+                script {
+                    env.BASELINE_REPLICAS = sh(
+                        script: '''
+                            set -e
+
+                            kubectl get deployment "$ACTIVE_DEPLOYMENT" \
+                                -n "$NAMESPACE" \
+                                -o jsonpath='{.status.replicas}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    env.BASELINE_READY = sh(
+                        script: '''
+                            set -e
+
+                            kubectl get deployment "$ACTIVE_DEPLOYMENT" \
+                                -n "$NAMESPACE" \
+                                -o jsonpath='{.status.readyReplicas}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    env.BASELINE_DESIRED = sh(
+                        script: '''
+                            set -e
+
+                            kubectl get hpa "$HPA_NAME" \
+                                -n "$NAMESPACE" \
+                                -o jsonpath='{.status.desiredReplicas}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Baseline replicas : ${env.BASELINE_REPLICAS}"
+                    echo "Baseline ready    : ${env.BASELINE_READY}"
+                    echo "HPA desired       : ${env.BASELINE_DESIRED}"
+
+                    if (!env.BASELINE_REPLICAS?.isInteger()) {
+                        error("Could not determine baseline Deployment replicas.")
+                    }
+
+                    if (env.BASELINE_REPLICAS.toInteger() < 1) {
+                        error(
+                            "Active deployment '${env.ACTIVE_DEPLOYMENT}' " +
+                            "has fewer than 1 replica."
+                        )
+                    }
+
+                    if (!env.BASELINE_READY?.isInteger() ||
+                        env.BASELINE_READY.toInteger() < 1) {
+                        error(
+                            "Active deployment '${env.ACTIVE_DEPLOYMENT}' " +
+                            "does not currently have a ready pod."
+                        )
+                    }
+                }
+            }
+        }
+
+        stage('Start CPU Stress') {
+            steps {
+                script {
+                    def seconds = params.STRESS_SECONDS as Integer
+
+                    if (seconds < 30 || seconds > 600) {
+                        error(
+                            "STRESS_SECONDS must be between 30 and 600."
+                        )
+                    }
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================="
+                        echo "PODS SELECTED FOR CPU STRESS"
+                        echo "=============================================="
+
+                        kubectl get pods \
+                            -n "$NAMESPACE" \
+                            -l app=user-service,version="$ACTIVE_COLOR" \
+                            -o wide
+                    '''
+
+                    sh """
+                        set -e
+
+                        rm -f "\$WORKSPACE"/stress-*.pid
+
+                        echo "Starting Python CPU stress."
+                        echo "Stress duration: ${seconds} seconds"
+
+                        for POD in \$(kubectl get pods \
+                            -n "\$NAMESPACE" \
+                            -l app=user-service,version="${env.ACTIVE_COLOR}" \
+                            -o jsonpath='{range .items[*]}{.metadata.name}{"\\\\n"}{end}')
+                        do
+                            echo "Starting stress in \$POD"
+
+                            kubectl exec \
+                                -n "\$NAMESPACE" \
+                                "\$POD" \
+                                -- sh -c 'python -c "while True: pass" >/dev/null 2>&1 & echo \\$!' \
+                                > "\$WORKSPACE/stress-\$POD.pid"
+
+                            PID=\$(cat "\$WORKSPACE/stress-\$POD.pid")
+
+                            echo "Remote stress PID for \$POD: \$PID"
+                        done
+
+                        echo
+                        echo "CPU stress started successfully."
+                    """
+                }
+            }
+        }
+
+        stage('Watch HPA Scale Up') {
+            steps {
+                script {
+                    def seconds = params.STRESS_SECONDS as Integer
+                    def interval = params.CHECK_INTERVAL as Integer
+
+                    if (interval < 5 || interval > 60) {
+                        error(
+                            "CHECK_INTERVAL must be between 5 and 60 seconds."
+                        )
+                    }
+
+                    int checks = Math.ceil(
+                        seconds / interval
+                    ) as Integer
+
+                    boolean scaleUpObserved = false
+
+                    echo "Watching HPA for approximately ${seconds} seconds."
+                    echo "Expected HPA scale-up: 1 -> 2."
+
+                    for (int i = 1; i <= checks; i++) {
+
+                        sh '''
+                            echo
+                            echo "=============================================="
+                            echo "HPA CHECK"
+                            echo "=============================================="
+
+                            date
+
+                            echo
+                            echo "HPA:"
+                            kubectl get hpa "$HPA_NAME" \
+                                -n "$NAMESPACE"
+
+                            echo
+                            echo "Deployment:"
+                            kubectl get deployment "$ACTIVE_DEPLOYMENT" \
+                                -n "$NAMESPACE"
+
+                            echo
+                            echo "Pod metrics:"
+                            kubectl top pods \
+                                -n "$NAMESPACE" \
+                                -l app=user-service
+
+                            echo
+                            echo "Active pods:"
+                            kubectl get pods \
+                                -n "$NAMESPACE" \
+                                -l app=user-service,version="$ACTIVE_COLOR"
+                        '''
+
+                        def desired = sh(
+                            script: '''
+                                kubectl get hpa "$HPA_NAME" \
+                                    -n "$NAMESPACE" \
+                                    -o jsonpath='{.status.desiredReplicas}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        def current = sh(
+                            script: '''
+                                kubectl get hpa "$HPA_NAME" \
+                                    -n "$NAMESPACE" \
+                                    -o jsonpath='{.status.currentReplicas}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        echo "HPA desired replicas: ${desired}"
+                        echo "HPA current replicas: ${current}"
+
+                        if (desired?.isInteger() &&
+                            desired.toInteger() >= 2) {
+
+                            scaleUpObserved = true
+
+                            echo "HPA scale-up recommendation to 2 replicas observed."
+                        }
+
+                        if (current?.isInteger() &&
+                            current.toInteger() >= 2) {
+
+                            scaleUpObserved = true
+
+                            echo "HPA current replica count reached 2."
+                        }
+
+                        if (i < checks) {
+                            sleep time: interval, unit: 'SECONDS'
+                        }
+                    }
+
+                    if (!scaleUpObserved) {
+                        error(
+                            "HPA did not scale user-service to 2 replicas " +
+                            "during the CPU stress period."
+                        )
+                    }
+
+                    env.SCALE_UP_OBSERVED = 'true'
+                }
+            }
+        }
+
+        stage('Stop CPU Stress') {
+            steps {
+                sh '''
+                    set +e
+
+                    echo "=============================================="
+                    echo "STOP CPU STRESS"
+                    echo "=============================================="
+
+                    for PID_FILE in "$WORKSPACE"/stress-*.pid
+                    do
+                        [ -f "$PID_FILE" ] || continue
+
+                        POD=$(basename "$PID_FILE" .pid)
+                        PID=$(cat "$PID_FILE")
+
+                        echo "Stopping stress PID $PID in $POD"
+
+                        kubectl exec \
+                            -n "$NAMESPACE" \
+                            "$POD" \
+                            -- kill "$PID" 2>/dev/null || true
+
+                        rm -f "$PID_FILE"
+                    done
+
+                    echo "CPU stress cleanup completed."
+                '''
+            }
+        }
+
+        stage('Verify Load Removed') {
+            steps {
+                sh '''
+                    set +e
+
+                    echo "=============================================="
+                    echo "VERIFY LOAD REMOVAL"
+                    echo "=============================================="
+
+                    sleep 15
+
+                    kubectl top pods \
+                        -n "$NAMESPACE" \
+                        -l app=user-service
+
+                    echo
+                    kubectl get hpa "$HPA_NAME" \
+                        -n "$NAMESPACE"
+                '''
+            }
+        }
+
+        stage('Watch HPA Scale Down') {
+            steps {
+                script {
+                    def interval = params.CHECK_INTERVAL as Integer
+                    def waitSeconds =
+                        params.SCALE_DOWN_WAIT_SECONDS as Integer
+
+                    if (interval < 5 || interval > 60) {
+                        error(
+                            "CHECK_INTERVAL must be between 5 and 60 seconds."
+                        )
+                    }
+
+                    if (waitSeconds < 300 || waitSeconds > 600) {
+                        error(
+                            "SCALE_DOWN_WAIT_SECONDS must be between " +
+                            "300 and 600 seconds."
+                        )
+                    }
+
+                    int checks = Math.ceil(
+                        waitSeconds / interval
+                    ) as Integer
+
+                    boolean scaleDownObserved = false
+
+                    echo "=============================================="
+                    echo "WATCH HPA SCALE DOWN"
+                    echo "=============================================="
+
+                    echo "Waiting up to ${waitSeconds} seconds."
+                    echo "HPA scale-down stabilization is 300 seconds."
+
+                    for (int i = 1; i <= checks; i++) {
+
+                        sh '''
+                            echo
+                            echo "=============================================="
+                            echo "SCALE-DOWN CHECK"
+                            echo "=============================================="
+
+                            date
+
+                            echo
+                            echo "HPA:"
+                            kubectl get hpa "$HPA_NAME" \
+                                -n "$NAMESPACE"
+
+                            echo
+                            echo "Deployment:"
+                            kubectl get deployment "$ACTIVE_DEPLOYMENT" \
+                                -n "$NAMESPACE"
+
+                            echo
+                            echo "Pod metrics:"
+                            kubectl top pods \
+                                -n "$NAMESPACE" \
+                                -l app=user-service
+
+                            echo
+                            echo "Active pods:"
+                            kubectl get pods \
+                                -n "$NAMESPACE" \
+                                -l app=user-service,version="$ACTIVE_COLOR"
+                        '''
+
+                        def desired = sh(
+                            script: '''
+                                kubectl get hpa "$HPA_NAME" \
+                                    -n "$NAMESPACE" \
+                                    -o jsonpath='{.status.desiredReplicas}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        def current = sh(
+                            script: '''
+                                kubectl get hpa "$HPA_NAME" \
+                                    -n "$NAMESPACE" \
+                                    -o jsonpath='{.status.currentReplicas}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        echo "HPA desired replicas: ${desired}"
+                        echo "HPA current replicas: ${current}"
+
+                        if (desired?.isInteger() &&
+                            desired.toInteger() <= 1 &&
+                            current?.isInteger() &&
+                            current.toInteger() <= 1) {
+
+                            scaleDownObserved = true
+
+                            echo "HPA returned to 1 replica."
+                            break
+                        }
+
+                        if (i < checks) {
+                            sleep time: interval, unit: 'SECONDS'
+                        }
+                    }
+
+                    if (!scaleDownObserved) {
+                        error(
+                            "HPA did not return to 1 replica within " +
+                            "${waitSeconds} seconds after CPU stress stopped."
+                        )
+                    }
+
+                    env.SCALE_DOWN_OBSERVED = 'true'
+                }
+            }
+        }
+
+        stage('Final HPA Report') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo
+                    echo "=============================================="
+                    echo "FINAL HPA STATE"
+                    echo "=============================================="
+
+                    kubectl get hpa "$HPA_NAME" \
+                        -n "$NAMESPACE"
+
+                    echo
+                    echo "Deployment:"
+                    kubectl get deployment "$ACTIVE_DEPLOYMENT" \
+                        -n "$NAMESPACE"
+
+                    echo
+                    echo "Pods:"
+                    kubectl get pods \
+                        -n "$NAMESPACE" \
+                        -l app=user-service
+
+                    echo
+                    echo "Pod metrics:"
+                    kubectl top pods \
+                        -n "$NAMESPACE" \
+                        -l app=user-service
+
+                    echo
+                    echo "HPA target:"
+                    kubectl get hpa "$HPA_NAME" \
+                        -n "$NAMESPACE" \
+                        -o jsonpath='{.spec.scaleTargetRef.name}'
+
+                    echo
+                    echo
+                    echo "Expected final state:"
+                    echo "  Active color       : $ACTIVE_COLOR"
+                    echo "  HPA target         : $ACTIVE_DEPLOYMENT"
+                    echo "  Desired replicas   : 1"
+                    echo "  Scale-up observed  : $SCALE_UP_OBSERVED"
+                    echo "  Scale-down observed: $SCALE_DOWN_OBSERVED"
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                set +e
+
+                echo "=============================================="
+                echo "FINAL STRESS CLEANUP"
+                echo "=============================================="
+
+                for PID_FILE in "$WORKSPACE"/stress-*.pid
+                do
+                    [ -f "$PID_FILE" ] || continue
+
+                    POD=$(basename "$PID_FILE" .pid)
+                    PID=$(cat "$PID_FILE")
+
+                    echo "Cleanup: stopping PID $PID in $POD"
+
+                    kubectl exec \
+                        -n "$NAMESPACE" \
+                        "$POD" \
+                        -- kill "$PID" 2>/dev/null || true
+
+                    rm -f "$PID_FILE"
+                done
+
+                echo "Cleanup completed."
+            '''
+        }
+
+        success {
+            echo '''
+==============================================
+HPA TEST PASSED
+==============================================
+CPU stress caused HPA scale-up and the
+active user-service returned to the minimum
+replica count after the stabilization period.
+'''
+        }
+
+        failure {
+            echo '''
+==============================================
+HPA TEST FAILED
+==============================================
+The pipeline attempted to clean up any
+remaining CPU stress processes.
+==============================================
+'''
+        }
+    }
+}

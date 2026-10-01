@@ -1,0 +1,128 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_REGION         = 'ap-south-1'
+
+        TF_DIR             = 'terraform'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Terraform Version') {
+            steps {
+                sh '''
+                    set -e
+
+                    terraform version
+                    aws --version
+                '''
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
+
+                        cd "$TF_DIR"
+
+                        terraform init
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                sh '''
+                    set -e
+
+                    cd "$TF_DIR"
+
+                    terraform validate
+                '''
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user'],
+
+                    string(
+                        credentialsId: 'rds-db-password',
+                        variable: 'TF_VAR_db_password'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        cd "$TF_DIR"
+
+                        terraform plan \
+                            -out=tfplan
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                input message: 'Apply Terraform infrastructure?', ok: 'Apply'
+
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user'],
+
+                    string(
+                        credentialsId: 'rds-db-password',
+                        variable: 'TF_VAR_db_password'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        cd "$TF_DIR"
+
+                        terraform apply -auto-approve tfplan
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Terraform infrastructure deployment completed successfully.'
+        }
+
+        failure {
+            echo 'Terraform pipeline failed.'
+        }
+
+        always {
+            sh '''
+                rm -f "$WORKSPACE/terraform/tfplan" 2>/dev/null || true
+            '''
+        }
+    }
+}

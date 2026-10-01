@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart-service
+  namespace: nodejs-devops
+  labels:
+    app: cart-service
+    track: rolling
+    monitoring: cart-service
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: cart-service
+      track: rolling
+      monitoring: cart-service
+  template:
+    metadata:
+      labels:
+        app: cart-service
+        track: rolling
+        monitoring: cart-service
+    spec:
+      containers:
+        - name: cart-service
+          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-cart-service:IMAGE_TAG_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8003
+          env:
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: ecommerce-config
+                  key: REDIS_HOST
+            - name: REDIS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: ecommerce-config
+                  key: REDIS_PORT
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 15
+            periodSeconds: 20

@@ -6,9 +6,9 @@ metadata:
   labels:
     app: user-service
     version: green
+    monitoring: user-service
 
 spec:
-  replicas: 2
 
   selector:
     matchLabels:
@@ -20,15 +20,17 @@ spec:
       labels:
         app: user-service
         version: green
+        monitoring: user-service
 
     spec:
       containers:
         - name: user-service
-          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-user-service:1.0
+          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-user-service:IMAGE_TAG_PLACEHOLDER
           imagePullPolicy: IfNotPresent
 
           ports:
-            - containerPort: 8001
+            - name: http
+              containerPort: 8001
 
           env:
             - name: POSTGRES_DB
@@ -66,3 +68,21 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3

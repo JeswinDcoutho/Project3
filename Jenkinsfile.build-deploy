@@ -1,0 +1,802 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_REGION         = 'ap-south-1'
+
+        AWS_ACCOUNT_ID     = '777000838263'
+        ECR_REGISTRY       = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+
+        EKS_CLUSTER        = 'ecommerce-eks'
+        NAMESPACE          = 'nodejs-devops'
+
+        USER_REPOSITORY      = 'ecommerce-user-service'
+        PRODUCT_REPOSITORY   = 'ecommerce-product-service'
+        CART_REPOSITORY      = 'ecommerce-cart-service'
+        ORDER_REPOSITORY     = 'ecommerce-order-service'
+        PAYMENT_REPOSITORY   = 'ecommerce-payment-service'
+        INVENTORY_REPOSITORY = 'ecommerce-inventory-service'
+
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        // ============================================================
+        // CHECKOUT
+        // ============================================================
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // ============================================================
+        // SHOW BUILD INFORMATION
+        // ============================================================
+
+        stage('Build Information') {
+            steps {
+                echo "=============================================="
+                echo "Jenkins Build Number : ${BUILD_NUMBER}"
+                echo "Docker Image Tag     : ${BUILD_NUMBER}"
+                echo "AWS Region           : ${AWS_REGION}"
+                echo "EKS Cluster          : ${EKS_CLUSTER}"
+                echo "Namespace            : ${NAMESPACE}"
+                echo "=============================================="
+            }
+        }
+
+        // ============================================================
+        // AWS / ECR LOGIN
+        // ============================================================
+
+        stage('AWS Login') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
+
+                        aws sts get-caller-identity
+
+                        aws eks update-kubeconfig \
+                            --region "$AWS_REGION" \
+                            --name "$EKS_CLUSTER"
+
+                        aws ecr get-login-password \
+                            --region "$AWS_REGION" |
+                        docker login \
+                            --username AWS \
+                            --password-stdin "$ECR_REGISTRY"
+                    '''
+                }
+            }
+        }
+
+        // ============================================================
+        // BUILD IMAGES
+        // ============================================================
+
+        stage('Build Docker Images') {
+            parallel {
+
+                stage('Build user-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker build \
+                                -t "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                services/user-service
+                        '''
+                    }
+                }
+
+                stage('Build product-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker build \
+                                -t "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
+                                services/product-service
+                        '''
+                    }
+                }
+
+                stage('Build cart-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker build \
+                                -t "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
+                                services/cart-service
+                        '''
+                    }
+                }
+
+                stage('Build order-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker build \
+                                -t "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
+                                services/order-service
+                        '''
+                    }
+                }
+
+                stage('Build payment-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker build \
+                                -t "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
+                                services/payment-service
+                        '''
+                    }
+                }
+
+                stage('Build inventory-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            docker build \
+                                -t "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
+                                services/inventory-service
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // PUSH IMAGES
+        // ============================================================
+
+        stage('Push Docker Images') {
+            steps {
+                sh '''
+                    set -e
+
+                    docker push \
+                        "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG"
+
+                    docker push \
+                        "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG"
+
+                    docker push \
+                        "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG"
+
+                    docker push \
+                        "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG"
+
+                    docker push \
+                        "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG"
+
+                    docker push \
+                        "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG"
+                '''
+            }
+        }
+
+        // ============================================================
+        // VERIFY ECR IMAGES
+        // ============================================================
+
+        stage('Verify ECR Images') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Verifying images with tag: $IMAGE_TAG"
+
+                    aws ecr describe-images \
+                        --repository-name "$USER_REPOSITORY" \
+                        --image-ids imageTag="$IMAGE_TAG" \
+                        --region "$AWS_REGION" \
+                        >/dev/null
+
+                    aws ecr describe-images \
+                        --repository-name "$PRODUCT_REPOSITORY" \
+                        --image-ids imageTag="$IMAGE_TAG" \
+                        --region "$AWS_REGION" \
+                        >/dev/null
+
+                    aws ecr describe-images \
+                        --repository-name "$CART_REPOSITORY" \
+                        --image-ids imageTag="$IMAGE_TAG" \
+                        --region "$AWS_REGION" \
+                        >/dev/null
+
+                    aws ecr describe-images \
+                        --repository-name "$ORDER_REPOSITORY" \
+                        --image-ids imageTag="$IMAGE_TAG" \
+                        --region "$AWS_REGION" \
+                        >/dev/null
+
+                    aws ecr describe-images \
+                        --repository-name "$PAYMENT_REPOSITORY" \
+                        --image-ids imageTag="$IMAGE_TAG" \
+                        --region "$AWS_REGION" \
+                        >/dev/null
+
+                    aws ecr describe-images \
+                        --repository-name "$INVENTORY_REPOSITORY" \
+                        --image-ids imageTag="$IMAGE_TAG" \
+                        --region "$AWS_REGION" \
+                        >/dev/null
+
+                    echo "All six images verified in ECR."
+                '''
+            }
+        }
+
+        // ============================================================
+        // CREATE / UPDATE DB SECRET
+        // ============================================================
+
+        stage('Create Kubernetes DB Secret') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'rds-db-password',
+                        variable: 'RDS_DB_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        kubectl create secret generic ecommerce-db-secret \
+                            --namespace "$NAMESPACE" \
+                            --from-literal=POSTGRES_USER=ecommerce \
+                            --from-literal=POSTGRES_PASSWORD="$RDS_DB_PASSWORD" \
+                            --dry-run=client \
+                            -o yaml |
+                        kubectl apply -f -
+
+                        echo "Kubernetes DB secret created/updated."
+                    '''
+                }
+            }
+        }
+
+        // ============================================================
+        // VERIFY CLUSTER
+        // ============================================================
+
+        stage('Verify Kubernetes Cluster') {
+            steps {
+                sh '''
+                    set -e
+
+                    kubectl cluster-info
+
+                    kubectl get nodes
+
+                    kubectl get namespace "$NAMESPACE"
+                '''
+            }
+        }
+
+        // ============================================================
+        // NORMAL ROLLINGUPDATE SERVICES
+        // ============================================================
+
+        stage('Deploy RollingUpdate Services') {
+            parallel {
+
+                stage('Deploy product-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/product-service-deployment.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/product-service \
+                                product-service="$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl rollout status \
+                                deployment/product-service \
+                                -n "$NAMESPACE" \
+                                --timeout=5m
+                        '''
+                    }
+                }
+
+                stage('Deploy cart-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/cart-service-deployment.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/cart-service \
+                                cart-service="$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl rollout status \
+                                deployment/cart-service \
+                                -n "$NAMESPACE" \
+                                --timeout=5m
+                        '''
+                    }
+                }
+
+                stage('Deploy order-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/order-service-deployment.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/order-service \
+                                order-service="$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl rollout status \
+                                deployment/order-service \
+                                -n "$NAMESPACE" \
+                                --timeout=5m
+                        '''
+                    }
+                }
+
+                stage('Deploy payment-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/payment-service-deployment.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/payment-service \
+                                payment-service="$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl rollout status \
+                                deployment/payment-service \
+                                -n "$NAMESPACE" \
+                                --timeout=5m
+                        '''
+                    }
+                }
+
+                stage('Deploy inventory-service') {
+                    steps {
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/inventory-service-deployment.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/inventory-service \
+                                inventory-service="$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl rollout status \
+                                deployment/inventory-service \
+                                -n "$NAMESPACE" \
+                                --timeout=5m
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // ENSURE STABLE SERVICES
+        // ============================================================
+
+        stage('Apply Stable Services') {
+            steps {
+                sh '''
+                    set -e
+
+                    kubectl apply \
+                        -f k8s/product-service-bg-service.yaml \
+                        -f k8s/cart-service-bg-service.yaml \
+                        -f k8s/order-service-bg-service.yaml \
+                        -f k8s/payment-service-bg-service.yaml \
+                        -f k8s/inventory-service-bg-service.yaml \
+                        -n "$NAMESPACE"
+                '''
+            }
+        }
+
+        // ============================================================
+        // DETERMINE CURRENT USER COLOR
+        // ============================================================
+
+        stage('Determine Active User Color') {
+            steps {
+                script {
+
+                    def activeColor = sh(
+                        script: '''
+                            set +e
+
+                            kubectl get service user-service-bg \
+                                -n "$NAMESPACE" \
+                                -o jsonpath='{.spec.selector.version}' \
+                                2>/dev/null
+
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    if (activeColor == 'blue') {
+                        env.CURRENT_COLOR = 'blue'
+                        env.TARGET_COLOR = 'green'
+                    }
+                    else if (activeColor == 'green') {
+                        env.CURRENT_COLOR = 'green'
+                        env.TARGET_COLOR = 'blue'
+                    }
+                    else {
+                        /*
+                         * Bootstrap case.
+                         *
+                         * user-service-bg already points to blue
+                         * in the current manifest.
+                         */
+                        env.CURRENT_COLOR = 'none'
+                        env.TARGET_COLOR = 'blue'
+                    }
+
+                    echo "Current user-service color: ${env.CURRENT_COLOR}"
+                    echo "Target user-service color : ${env.TARGET_COLOR}"
+                }
+            }
+        }
+
+        // ============================================================
+        // PREPARE BLUE/GREEN TARGET
+        // ============================================================
+
+        stage('Prepare User Blue Green Target') {
+            steps {
+                script {
+
+                    if (env.TARGET_COLOR == 'blue') {
+
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/user-service-blue.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/user-service-blue \
+                                user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl scale deployment/user-service-blue \
+                                --replicas=1 \
+                                -n "$NAMESPACE"
+                        '''
+
+                    } else {
+
+                        sh '''
+                            set -e
+
+                            kubectl apply \
+                                -f k8s/user-service-green.yaml \
+                                -n "$NAMESPACE"
+
+                            kubectl set image \
+                                deployment/user-service-green \
+                                user-service="$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
+                                -n "$NAMESPACE"
+
+                            kubectl scale deployment/user-service-green \
+                                --replicas=1 \
+                                -n "$NAMESPACE"
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // WAIT FOR TARGET COLOR
+        // ============================================================
+
+        stage('Wait For User Target Rollout') {
+            steps {
+                script {
+
+                    def targetDeployment =
+                        "user-service-${env.TARGET_COLOR}"
+
+                    sh """
+                        set -e
+
+                        kubectl rollout status \
+                            deployment/${targetDeployment} \
+                            -n "\$NAMESPACE" \
+                            --timeout=5m
+                    """
+                }
+            }
+        }
+
+        // ============================================================
+        // VERIFY TARGET PODS
+        // ============================================================
+
+        stage('Verify User Target Pods') {
+            steps {
+                script {
+
+                    def targetColor = env.TARGET_COLOR
+
+                    sh """
+                        set -e
+
+                        echo "Target color: ${targetColor}"
+
+                        kubectl get deployment \
+                            user-service-${targetColor} \
+                            -n "\$NAMESPACE"
+
+                        kubectl get pods \
+                            -n "\$NAMESPACE" \
+                            -l app=user-service,version=${targetColor}
+
+                        READY=\$(kubectl get deployment \
+                            user-service-${targetColor} \
+                            -n "\$NAMESPACE" \
+                            -o jsonpath='{.status.readyReplicas}')
+
+                        if [ "\$READY" != "1" ]; then
+                            echo "Target deployment is not ready."
+                            exit 1
+                        fi
+                    """
+                }
+            }
+        }
+
+        // ============================================================
+        // SWITCH TRAFFIC
+        // ============================================================
+
+        stage('Switch User Traffic') {
+            steps {
+                script {
+
+                    def targetColor = env.TARGET_COLOR
+
+                    sh """
+                        set -e
+
+                        kubectl patch service user-service-bg \
+                            -n "\$NAMESPACE" \
+                            -p '{"spec":{"selector":{"app":"user-service","version":"${targetColor}"}}}'
+
+                        echo "Traffic switched to ${targetColor}."
+                    """
+                }
+            }
+        }
+
+        // ============================================================
+        // UPDATE HPA TARGET
+        // ============================================================
+
+        stage('Update HPA Target') {
+            steps {
+                script {
+
+                    def targetColor = env.TARGET_COLOR
+                    def targetDeployment =
+                        "user-service-${targetColor}"
+
+                    sh """
+                        set -e
+
+                        kubectl apply \
+                            -f k8s/user-service-hpa.yaml \
+                            -n "\$NAMESPACE"
+
+                        kubectl patch hpa user-service-hpa \
+                            -n "\$NAMESPACE" \
+                            --type='merge' \
+                            -p '{"spec":{"scaleTargetRef":{"apiVersion":"apps/v1","kind":"Deployment","name":"${targetDeployment}"}}}'
+
+                        echo "HPA now targets ${targetDeployment}."
+
+                        kubectl get hpa \
+                            user-service-hpa \
+                            -n "\$NAMESPACE"
+                    """
+                }
+            }
+        }
+
+        // ============================================================
+        // VERIFY TRAFFIC
+        // ============================================================
+
+        stage('Verify User Service Traffic') {
+            steps {
+                script {
+
+                    def targetColor = env.TARGET_COLOR
+
+                    sh """
+                        set -e
+
+                        echo "Service selector:"
+                        kubectl get service user-service-bg \
+                            -n "\$NAMESPACE" \
+                            -o jsonpath='{.spec.selector}'
+
+                        echo
+
+                        echo "Target pods:"
+                        kubectl get pods \
+                            -n "\$NAMESPACE" \
+                            -l app=user-service,version=${targetColor} \
+                            -o wide
+
+                        echo "Endpoints:"
+                        kubectl get endpoints user-service-bg \
+                            -n "\$NAMESPACE"
+                    """
+                }
+            }
+        }
+
+        // ============================================================
+        // DEACTIVATE OLD COLOR
+        // ============================================================
+
+        stage('Deactivate Old User Color') {
+            steps {
+                script {
+
+                    if (env.CURRENT_COLOR == 'blue') {
+
+                        sh '''
+                            set -e
+
+                            kubectl scale deployment/user-service-blue \
+                                --replicas=0 \
+                                -n "$NAMESPACE"
+
+                            echo "Blue deployment scaled to 0."
+                        '''
+
+                    } else if (env.CURRENT_COLOR == 'green') {
+
+                        sh '''
+                            set -e
+
+                            kubectl scale deployment/user-service-green \
+                                --replicas=0 \
+                                -n "$NAMESPACE"
+
+                            echo "Green deployment scaled to 0."
+                        '''
+
+                    } else {
+
+                        echo 'Bootstrap deployment: no previous active color to deactivate.'
+                    }
+                }
+            }
+        }
+
+        // ============================================================
+        // FINAL STATE
+        // ============================================================
+
+        stage('Final Deployment Verification') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=============================================="
+                    echo "Deployments"
+                    echo "=============================================="
+
+                    kubectl get deployments \
+                        -n "$NAMESPACE"
+
+                    echo "=============================================="
+                    echo "Pods"
+                    echo "=============================================="
+
+                    kubectl get pods \
+                        -n "$NAMESPACE" \
+                        -o wide
+
+                    echo "=============================================="
+                    echo "Services"
+                    echo "=============================================="
+
+                    kubectl get services \
+                        -n "$NAMESPACE"
+
+                    echo "=============================================="
+                    echo "User HPA"
+                    echo "=============================================="
+
+                    kubectl get hpa \
+                        -n "$NAMESPACE"
+
+                    echo "=============================================="
+                    echo "User Service Selector"
+                    echo "=============================================="
+
+                    kubectl get service user-service-bg \
+                        -n "$NAMESPACE" \
+                        -o jsonpath='{.spec.selector}'
+
+                    echo
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo "=============================================="
+            echo "BUILD + DEPLOY SUCCESSFUL"
+            echo "Build number : ${BUILD_NUMBER}"
+            echo "Image tag    : ${BUILD_NUMBER}"
+            echo "=============================================="
+        }
+
+        failure {
+            echo "=============================================="
+            echo "BUILD + DEPLOY FAILED"
+            echo "Build number : ${BUILD_NUMBER}"
+            echo "=============================================="
+        }
+
+        always {
+            sh '''
+                docker logout "$ECR_REGISTRY" 2>/dev/null || true
+
+                docker image prune -f 2>/dev/null || true
+            '''
+        }
+    }
+}

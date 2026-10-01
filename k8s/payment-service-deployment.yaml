@@ -1,88 +1,75 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: user-service-blue
+  name: payment-service
   namespace: nodejs-devops
   labels:
-    app: user-service
-    version: blue
-    monitoring: user-service
-
+    app: payment-service
+    track: rolling
+    monitoring: payment-service
 spec:
-
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
-      app: user-service
-      version: blue
-
+      app: payment-service
+      track: rolling
+      monitoring: payment-service
   template:
     metadata:
       labels:
-        app: user-service
-        version: blue
-        monitoring: user-service
-
+        app: payment-service
+        track: rolling
+        monitoring: payment-service
     spec:
       containers:
-        - name: user-service
-          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-user-service:IMAGE_TAG_PLACEHOLDER
+        - name: payment-service
+          image: 777000838263.dkr.ecr.ap-south-1.amazonaws.com/ecommerce-payment-service:IMAGE_TAG_PLACEHOLDER
           imagePullPolicy: IfNotPresent
-
           ports:
-            - name: http
-              containerPort: 8001
-
+            - containerPort: 8005
           env:
-            - name: POSTGRES_DB
-              value: user_db
-
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: ecommerce-db-secret
                   key: POSTGRES_USER
-
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: ecommerce-db-secret
                   key: POSTGRES_PASSWORD
-
             - name: POSTGRES_HOST
               valueFrom:
                 configMapKeyRef:
                   name: ecommerce-config
                   key: POSTGRES_HOST
-
             - name: POSTGRES_PORT
               valueFrom:
                 configMapKeyRef:
                   name: ecommerce-config
                   key: POSTGRES_PORT
-
+            - name: POSTGRES_DB
+              value: payment_db
           resources:
             requests:
               cpu: 100m
               memory: 128Mi
-
             limits:
               cpu: 500m
               memory: 512Mi
-
           readinessProbe:
             httpGet:
               path: /health
-              port: 8001
+              port: 8005
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-
           livenessProbe:
             httpGet:
               path: /health
-              port: 8001
+              port: 8005
             initialDelaySeconds: 15
             periodSeconds: 20
-            timeoutSeconds: 3
-            failureThreshold: 3
