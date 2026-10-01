@@ -100,7 +100,7 @@ pipeline {
 
                             docker build \
                                 -t "$ECR_REGISTRY/$USER_REPOSITORY:$IMAGE_TAG" \
-                                services/user-service
+                                user-service
                         '''
                     }
                 }
@@ -112,7 +112,7 @@ pipeline {
 
                             docker build \
                                 -t "$ECR_REGISTRY/$PRODUCT_REPOSITORY:$IMAGE_TAG" \
-                                services/product-service
+                                product-service
                         '''
                     }
                 }
@@ -124,7 +124,7 @@ pipeline {
 
                             docker build \
                                 -t "$ECR_REGISTRY/$CART_REPOSITORY:$IMAGE_TAG" \
-                                services/cart-service
+                                cart-service
                         '''
                     }
                 }
@@ -136,7 +136,7 @@ pipeline {
 
                             docker build \
                                 -t "$ECR_REGISTRY/$ORDER_REPOSITORY:$IMAGE_TAG" \
-                                services/order-service
+                                order-service
                         '''
                     }
                 }
@@ -148,7 +148,7 @@ pipeline {
 
                             docker build \
                                 -t "$ECR_REGISTRY/$PAYMENT_REPOSITORY:$IMAGE_TAG" \
-                                services/payment-service
+                                payment-service
                         '''
                     }
                 }
@@ -160,7 +160,7 @@ pipeline {
 
                             docker build \
                                 -t "$ECR_REGISTRY/$INVENTORY_REPOSITORY:$IMAGE_TAG" \
-                                services/inventory-service
+                                inventory-service
                         '''
                     }
                 }
@@ -582,10 +582,12 @@ pipeline {
                             -n "\$NAMESPACE" \
                             -o jsonpath='{.status.readyReplicas}')
 
-                        if [ "\$READY" != "1" ]; then
-                            echo "Target deployment is not ready."
+                        if [ -z "\$READY" ] || [ "\$READY" -lt 1 ]; then
+                            echo "Target deployment has no ready replicas."
                             exit 1
                         fi
+
+                        echo "Target deployment is ready with \$READY replica(s)."
                     """
                 }
             }
