@@ -3,7 +3,6 @@ kind: HorizontalPodAutoscaler
 metadata:
   name: payment-service-hpa
   namespace: nodejs-devops
-
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -16,6 +15,7 @@ spec:
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 0
+      selectPolicy: Max
       policies:
         - type: Percent
           value: 100
@@ -23,23 +23,16 @@ spec:
 
     scaleDown:
       stabilizationWindowSeconds: 300
+      selectPolicy: Max
       policies:
         - type: Percent
           value: 50
           periodSeconds: 60
 
   metrics:
-
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
           averageUtilization: 70
-
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
