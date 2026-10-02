@@ -11,6 +11,8 @@ pipeline {
     environment {
         AWS_REGION   = 'ap-south-1'
         AWS_ACCOUNT  = '777000838263'
+        AWS_DEFAULT_REGION = 'ap-south-1'
+
         ECR_REGISTRY = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
         EKS_CLUSTER  = 'ecommerce-eks'
         NAMESPACE    = 'nodejs-devops'
@@ -18,7 +20,13 @@ pipeline {
         USER_SERVICE = 'user-service'
         USER_REPO    = 'ecommerce-user-service'
 
-        // Jenkins BUILD_NUMBER becomes the Docker image tag.
+        /*
+         * Jenkins BUILD_NUMBER becomes the Docker image tag.
+         *
+         * Build #1 -> image :1
+         * Build #2 -> image :2
+         * Build #3 -> image :3
+         */
         IMAGE_TAG = "${BUILD_NUMBER}"
 
         GIT_REPO   = 'https://github.com/JeswinDcoutho/Project3.git'
@@ -27,6 +35,11 @@ pipeline {
 
     stages {
 
+        /*
+         * ============================================================
+         * CHECKOUT
+         * ============================================================
+         */
         stage('Checkout') {
             steps {
                 checkout([
@@ -44,59 +57,83 @@ pipeline {
                     set -e
 
                     echo "=============================================="
-                    echo "USER-SERVICE ONLY PIPELINE"
+                    echo "USER-SERVICE ONLY BLUE/GREEN PIPELINE"
                     echo "=============================================="
                     echo "Jenkins build : ${BUILD_NUMBER}"
                     echo "Image tag     : ${IMAGE_TAG}"
+                    echo "Git branch    : ${GIT_BRANCH}"
                     echo "Git commit    : $(git rev-parse --short HEAD)"
                     echo "=============================================="
                 '''
             }
         }
 
+
+        /*
+         * ============================================================
+         * AWS LOGIN / EKS CONFIGURATION
+         * ============================================================
+         */
         stage('AWS Login') {
             steps {
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
                     sh '''
                         set -e
 
-                        echo "Configuring AWS credentials..."
+                        echo "=============================================="
+                        echo "AWS AUTHENTICATION"
+                        echo "=============================================="
+
+                        echo "AWS identity:"
                         aws sts get-caller-identity
 
+                        echo
                         echo "Configuring EKS kubeconfig..."
+
                         aws eks update-kubeconfig \
                           --name "${EKS_CLUSTER}" \
                           --region "${AWS_REGION}"
 
+                        echo
+                        echo "EKS context:"
+                        kubectl config current-context
+
+                        echo
+                        echo "Checking namespace:"
+                        kubectl get namespace "${NAMESPACE}"
+
+                        echo
                         echo "Logging in to ECR..."
+
                         aws ecr get-login-password \
                           --region "${AWS_REGION}" | \
                           docker login \
                           --username AWS \
                           --password-stdin "${ECR_REGISTRY}"
 
-                        echo "Current Kubernetes context:"
-                        kubectl config current-context
-
-                        echo "Checking namespace:"
-                        kubectl get namespace "${NAMESPACE}"
+                        echo
+                        echo "AWS / EKS / ECR authentication successful."
                     '''
                 }
             }
         }
 
+
+        /*
+         * ============================================================
+         * BUILD USER-SERVICE ONLY
+         * ============================================================
+         */
         stage('Build user-service Image') {
             steps {
                 sh '''
                     set -e
 
                     echo "=============================================="
-                    echo "BUILDING ONLY USER-SERVICE"
+                    echo "BUILDING USER-SERVICE ONLY"
                     echo "=============================================="
 
                     docker build \
@@ -104,350 +141,545 @@ pipeline {
                       ./user-service
 
                     echo
-                    echo "Image built successfully:"
+                    echo "Docker image created:"
                     docker images \
                       "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
                 '''
             }
         }
 
+
+        /*
+         * ============================================================
+         * PUSH USER-SERVICE ONLY
+         *
+         * IMPORTANT:
+         * The AWS credential binding is kept around BOTH:
+         *   docker push
+         *   aws ecr describe-images
+         *
+         * This fixes the NoCredentials failure from the previous run.
+         * ============================================================
+         */
         stage('Push user-service Image') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    echo "=============================================="
-                    echo "PUSHING ONLY USER-SERVICE"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "PUSHING USER-SERVICE ONLY"
+                        echo "=============================================="
 
-                    docker push \
-                      "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
+                        echo "Repository : ${USER_REPO}"
+                        echo "Image tag  : ${IMAGE_TAG}"
 
-                    echo
-                    echo "Verifying ECR image:"
+                        docker push \
+                          "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
 
-                    aws ecr describe-images \
-                      --repository-name "${USER_REPO}" \
-                      --image-ids imageTag="${IMAGE_TAG}" \
-                      --region "${AWS_REGION}" \
-                      --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest}' \
-                      --output table
-                '''
-            }
-        }
+                        echo
+                        echo "Verifying ECR image..."
 
-        stage('Determine Active Color') {
-            steps {
-                script {
+                        aws ecr describe-images \
+                          --repository-name "${USER_REPO}" \
+                          --image-ids imageTag="${IMAGE_TAG}" \
+                          --region "${AWS_REGION}" \
+                          --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest}' \
+                          --output table
 
-                    def activeColor = sh(
-                        script: '''
-                            set -e
-
-                            kubectl get service user-service-bg \
-                              -n "${NAMESPACE}" \
-                              -o jsonpath='{.spec.selector.version}'
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    if (activeColor != 'blue' && activeColor != 'green') {
-                        error(
-                            "Unable to determine active user-service color: '${activeColor}'"
-                        )
-                    }
-
-                    def targetColor =
-                        (activeColor == 'blue') ? 'green' : 'blue'
-
-                    env.CURRENT_COLOR = activeColor
-                    env.TARGET_COLOR  = targetColor
-
-                    echo "=============================================="
-                    echo "USER-SERVICE BLUE/GREEN"
-                    echo "=============================================="
-                    echo "Current color : ${env.CURRENT_COLOR}"
-                    echo "Target color  : ${env.TARGET_COLOR}"
-                    echo "=============================================="
+                        echo
+                        echo "ECR verification successful."
+                    '''
                 }
             }
         }
 
+
+        /*
+         * ============================================================
+         * CREATE / UPDATE DATABASE SECRET
+         *
+         * The secret is created from the Jenkins credential:
+         *   rds-db-password
+         *
+         * Password is NEVER printed.
+         * ============================================================
+         */
+        stage('Ensure Database Secret') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user'],
+
+                    string(
+                        credentialsId: 'rds-db-password',
+                        variable: 'RDS_DB_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        echo "=============================================="
+                        echo "ENSURING DATABASE SECRET"
+                        echo "=============================================="
+
+                        kubectl create secret generic ecommerce-db-secret \
+                          -n "${NAMESPACE}" \
+                          --from-literal=POSTGRES_USER='ecommerce' \
+                          --from-literal=POSTGRES_PASSWORD="$RDS_DB_PASSWORD" \
+                          --dry-run=client \
+                          -o yaml | \
+                        kubectl apply -f -
+
+                        echo "Database secret is ready."
+                    '''
+                }
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * DETERMINE ACTIVE COLOR
+         *
+         * Example:
+         *
+         * Current = green
+         * Target  = blue
+         *
+         * OR
+         *
+         * Current = blue
+         * Target  = green
+         * ============================================================
+         */
+        stage('Determine Active Color') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
+                        def activeColor = sh(
+                            script: '''
+                                set -e
+
+                                kubectl get service user-service-bg \
+                                  -n "${NAMESPACE}" \
+                                  -o jsonpath='{.spec.selector.version}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if (activeColor != 'blue' && activeColor != 'green') {
+                            error(
+                                "Unable to determine active user-service color: '${activeColor}'"
+                            )
+                        }
+
+                        def targetColor =
+                            (activeColor == 'blue') ? 'green' : 'blue'
+
+                        env.CURRENT_COLOR = activeColor
+                        env.TARGET_COLOR  = targetColor
+
+                        echo "=============================================="
+                        echo "BLUE/GREEN COLOR DECISION"
+                        echo "=============================================="
+                        echo "Current color : ${env.CURRENT_COLOR}"
+                        echo "Target color  : ${env.TARGET_COLOR}"
+                        echo "=============================================="
+                    }
+                }
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * PREPARE BLUE/GREEN TARGET
+         * ============================================================
+         */
         stage('Prepare Blue-Green Target') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
-                    TARGET_MANIFEST="k8s/user-service-${TARGET_COLOR}.yaml"
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                        TARGET_MANIFEST="k8s/user-service-${TARGET_COLOR}.yaml"
 
-                    echo "=============================================="
-                    echo "PREPARING TARGET COLOR"
-                    echo "=============================================="
-                    echo "Target deployment : ${TARGET_DEPLOYMENT}"
-                    echo "Target manifest   : ${TARGET_MANIFEST}"
-                    echo "Image             : ${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "PREPARING BLUE/GREEN TARGET"
+                        echo "=============================================="
+                        echo "Current color : ${CURRENT_COLOR}"
+                        echo "Target color  : ${TARGET_COLOR}"
+                        echo "Deployment    : ${TARGET_DEPLOYMENT}"
+                        echo "Manifest      : ${TARGET_MANIFEST}"
+                        echo "Image         : ${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
+                        echo "=============================================="
 
-                    echo
-                    echo "Clearing stale target replicas..."
+                        echo
+                        echo "Clearing any stale target replicas..."
 
-                    kubectl scale deployment "${TARGET_DEPLOYMENT}" \
-                      -n "${NAMESPACE}" \
-                      --replicas=0 \
-                      || true
+                        kubectl scale deployment "${TARGET_DEPLOYMENT}" \
+                          -n "${NAMESPACE}" \
+                          --replicas=0 \
+                          --ignore-not-found=true || true
 
-                    echo
-                    echo "Applying target manifest..."
+                        echo
+                        echo "Applying target manifest..."
 
-                    kubectl apply \
-                      -f "${TARGET_MANIFEST}" \
-                      -n "${NAMESPACE}"
+                        kubectl apply \
+                          -f "${TARGET_MANIFEST}" \
+                          -n "${NAMESPACE}"
 
-                    echo
-                    echo "Setting Jenkins build image..."
+                        echo
+                        echo "Setting image..."
 
-                    kubectl set image \
-                      deployment/"${TARGET_DEPLOYMENT}" \
-                      "${USER_SERVICE}=${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}" \
-                      -n "${NAMESPACE}"
+                        kubectl set image \
+                          deployment/"${TARGET_DEPLOYMENT}" \
+                          "${USER_SERVICE}=${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}" \
+                          -n "${NAMESPACE}"
 
-                    echo
-                    echo "Starting one target replica..."
+                        echo
+                        echo "Scaling target to one replica..."
 
-                    kubectl scale deployment "${TARGET_DEPLOYMENT}" \
-                      -n "${NAMESPACE}" \
-                      --replicas=1
+                        kubectl scale deployment "${TARGET_DEPLOYMENT}" \
+                          -n "${NAMESPACE}" \
+                          --replicas=1
 
-                    echo
-                    echo "Target deployment:"
-                    kubectl get deployment "${TARGET_DEPLOYMENT}" \
-                      -n "${NAMESPACE}" \
-                      -o wide
-                '''
+                        echo
+                        echo "Target deployment:"
+                        kubectl get deployment "${TARGET_DEPLOYMENT}" \
+                          -n "${NAMESPACE}" \
+                          -o wide
+                    '''
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * WAIT FOR TARGET
+         * ============================================================
+         */
         stage('Wait for Target') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
-                    echo "=============================================="
-                    echo "WAITING FOR TARGET ROLLOUT"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "WAITING FOR TARGET"
+                        echo "=============================================="
 
-                    kubectl rollout status \
-                      deployment/"${TARGET_DEPLOYMENT}" \
-                      -n "${NAMESPACE}" \
-                      --timeout=5m
+                        kubectl rollout status \
+                          deployment/"${TARGET_DEPLOYMENT}" \
+                          -n "${NAMESPACE}" \
+                          --timeout=5m
 
-                    echo
-                    echo "Target pods:"
+                        echo
+                        echo "Target rollout successful."
 
-                    kubectl get pods \
-                      -n "${NAMESPACE}" \
-                      -l "app=user-service,version=${TARGET_COLOR}" \
-                      -o wide
+                        echo
+                        echo "Target pods:"
+                        kubectl get pods \
+                          -n "${NAMESPACE}" \
+                          -l "app=user-service,version=${TARGET_COLOR}" \
+                          -o wide
 
-                    echo
-                    echo "Target deployment:"
-
-                    kubectl get deployment "${TARGET_DEPLOYMENT}" \
-                      -n "${NAMESPACE}"
-                '''
+                        echo
+                        echo "Target deployment:"
+                        kubectl get deployment "${TARGET_DEPLOYMENT}" \
+                          -n "${NAMESPACE}" \
+                          -o wide
+                    '''
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * SWITCH TRAFFIC
+         * ============================================================
+         */
         stage('Switch Traffic') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    echo "=============================================="
-                    echo "SWITCHING USER-SERVICE TRAFFIC"
-                    echo "=============================================="
-                    echo "${CURRENT_COLOR} -> ${TARGET_COLOR}"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "SWITCHING BLUE/GREEN TRAFFIC"
+                        echo "=============================================="
 
-                    kubectl patch service user-service-bg \
-                      -n "${NAMESPACE}" \
-                      --type=merge \
-                      -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${TARGET_COLOR}\"}}}"
+                        echo "Traffic:"
+                        echo "  ${CURRENT_COLOR} -> ${TARGET_COLOR}"
 
-                    echo
-                    echo "New service selector:"
+                        kubectl patch service user-service-bg \
+                          -n "${NAMESPACE}" \
+                          --type=merge \
+                          -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${TARGET_COLOR}\"}}}"
 
-                    kubectl get service user-service-bg \
-                      -n "${NAMESPACE}" \
-                      -o jsonpath='{.spec.selector}'
+                        echo
+                        echo "New service selector:"
 
-                    echo
-                '''
+                        kubectl get service user-service-bg \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.selector}'
+
+                        echo
+
+                        echo
+                        echo "Traffic successfully switched to ${TARGET_COLOR}."
+                    '''
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * CPU-ONLY HPA
+         *
+         * First apply the HPA manifest.
+         * Then dynamically point it at the active target deployment.
+         * ============================================================
+         */
         stage('Apply CPU-only HPA') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
-                    echo "=============================================="
-                    echo "APPLYING USER-SERVICE HPA"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "APPLYING CPU-ONLY HPA"
+                        echo "=============================================="
 
-                    kubectl apply \
-                      -f k8s/user-service-hpa.yaml \
-                      -n "${NAMESPACE}"
+                        kubectl apply \
+                          -f k8s/user-service-hpa.yaml \
+                          -n "${NAMESPACE}"
 
-                    echo
-                    echo "Retargeting HPA to:"
-                    echo "${TARGET_DEPLOYMENT}"
+                        echo
+                        echo "Retargeting HPA to:"
+                        echo "${TARGET_DEPLOYMENT}"
 
-                    kubectl patch hpa user-service-hpa \
-                      -n "${NAMESPACE}" \
-                      --type=merge \
-                      -p "{\"spec\":{\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"${TARGET_DEPLOYMENT}\"}}}"
+                        kubectl patch hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          --type=merge \
+                          -p "{\"spec\":{\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"${TARGET_DEPLOYMENT}\"}}}"
 
-                    echo
-                    echo "HPA status:"
+                        echo
+                        echo "HPA:"
+                        kubectl get hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          -o wide
 
-                    kubectl get hpa user-service-hpa \
-                      -n "${NAMESPACE}" \
-                      -o wide
+                        echo
+                        echo "HPA target:"
+                        kubectl get hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.scaleTargetRef.name}'
 
-                    echo
-                    echo "HPA target:"
+                        echo
 
-                    kubectl get hpa user-service-hpa \
-                      -n "${NAMESPACE}" \
-                      -o jsonpath='{.spec.scaleTargetRef.name}'
+                        echo
+                        echo "HPA metrics:"
+                        kubectl get hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.metrics}'
 
-                    echo
-                '''
+                        echo
+                    '''
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * DEACTIVATE OLD COLOR
+         * ============================================================
+         */
         stage('Deactivate Old Color') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    OLD_DEPLOYMENT="user-service-${CURRENT_COLOR}"
+                        OLD_DEPLOYMENT="user-service-${CURRENT_COLOR}"
 
-                    echo "=============================================="
-                    echo "DEACTIVATING OLD COLOR"
-                    echo "=============================================="
-                    echo "Old deployment: ${OLD_DEPLOYMENT}"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "DEACTIVATING OLD COLOR"
+                        echo "=============================================="
 
-                    kubectl scale deployment "${OLD_DEPLOYMENT}" \
-                      -n "${NAMESPACE}" \
-                      --replicas=0
+                        echo "Old deployment:"
+                        echo "${OLD_DEPLOYMENT}"
 
-                    echo
-                    echo "Blue/Green state:"
+                        echo
+                        echo "Scaling old color to zero..."
 
-                    kubectl get deployment \
-                      user-service-blue \
-                      user-service-green \
-                      -n "${NAMESPACE}"
-                '''
+                        kubectl scale deployment "${OLD_DEPLOYMENT}" \
+                          -n "${NAMESPACE}" \
+                          --replicas=0
+
+                        echo
+                        echo "Blue/Green deployment state:"
+
+                        kubectl get deployment \
+                          user-service-blue \
+                          user-service-green \
+                          -n "${NAMESPACE}" \
+                          -o wide
+                    '''
+                }
             }
         }
 
+
+        /*
+         * ============================================================
+         * FINAL VERIFICATION
+         * ============================================================
+         */
         stage('Final Verification') {
             steps {
-                sh '''
-                    set -e
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    echo
-                    echo "=============================================="
-                    echo "FINAL USER-SERVICE VERIFICATION"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "FINAL USER-SERVICE VERIFICATION"
+                        echo "=============================================="
 
-                    echo
-                    echo "1. Service:"
-                    kubectl get service user-service-bg \
-                      -n "${NAMESPACE}" \
-                      -o wide
+                        echo
+                        echo "1. Service:"
+                        kubectl get service user-service-bg \
+                          -n "${NAMESPACE}" \
+                          -o wide
 
-                    echo
-                    echo "2. Service selector:"
-                    kubectl get service user-service-bg \
-                      -n "${NAMESPACE}" \
-                      -o jsonpath='{.spec.selector}'
-                    echo
+                        echo
+                        echo "2. Service selector:"
+                        kubectl get service user-service-bg \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.selector}'
+                        echo
 
-                    echo
-                    echo "3. Blue/Green deployments:"
-                    kubectl get deployment \
-                      user-service-blue \
-                      user-service-green \
-                      -n "${NAMESPACE}"
+                        echo
+                        echo "3. Deployments:"
+                        kubectl get deployment \
+                          user-service-blue \
+                          user-service-green \
+                          -n "${NAMESPACE}" \
+                          -o wide
 
-                    echo
-                    echo "4. User-service pods:"
-                    kubectl get pods \
-                      -n "${NAMESPACE}" \
-                      -l app=user-service \
-                      -o wide
+                        echo
+                        echo "4. Pods:"
+                        kubectl get pods \
+                          -n "${NAMESPACE}" \
+                          -l app=user-service \
+                          -o wide
 
-                    echo
-                    echo "5. HPA:"
-                    kubectl get hpa user-service-hpa \
-                      -n "${NAMESPACE}" \
-                      -o wide
+                        echo
+                        echo "5. HPA:"
+                        kubectl get hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          -o wide
 
-                    echo
-                    echo "6. HPA target:"
-                    kubectl get hpa user-service-hpa \
-                      -n "${NAMESPACE}" \
-                      -o jsonpath='{.spec.scaleTargetRef.name}'
-                    echo
+                        echo
+                        echo "6. HPA target:"
+                        kubectl get hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.scaleTargetRef.name}'
+                        echo
 
-                    echo
-                    echo "7. Active deployment image:"
-                    kubectl get deployment \
-                      "user-service-${TARGET_COLOR}" \
-                      -n "${NAMESPACE}" \
-                      -o jsonpath='{.spec.template.spec.containers[0].image}'
-                    echo
+                        echo
+                        echo "7. HPA metrics:"
+                        kubectl get hpa user-service-hpa \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.metrics}'
+                        echo
 
-                    echo
-                    echo "=============================================="
-                    echo "USER-SERVICE VERIFICATION COMPLETE"
-                    echo "=============================================="
-                '''
+                        echo
+                        echo "8. Active image:"
+                        kubectl get deployment \
+                          "user-service-${TARGET_COLOR}" \
+                          -n "${NAMESPACE}" \
+                          -o jsonpath='{.spec.template.spec.containers[0].image}'
+                        echo
+
+                        echo
+                        echo "=============================================="
+                        echo "FINAL STATE"
+                        echo "=============================================="
+                        echo "Current color before deployment : ${CURRENT_COLOR}"
+                        echo "New active color                : ${TARGET_COLOR}"
+                        echo "Image tag                       : ${IMAGE_TAG}"
+                        echo "=============================================="
+                    '''
+                }
             }
         }
     }
 
+
+    /*
+     * ================================================================
+     * POST ACTIONS
+     * ================================================================
+     */
     post {
 
         success {
             echo """
 ==============================================
-USER-SERVICE BLUE/GREEN + HPA SUCCESS
+USER-SERVICE PIPELINE SUCCESSFUL
 ==============================================
 Jenkins build : ${BUILD_NUMBER}
 Image tag     : ${IMAGE_TAG}
 Current color : ${env.CURRENT_COLOR}
-Active color  : ${env.TARGET_COLOR}
-HPA target    : user-service-${env.TARGET_COLOR}
+Target color  : ${env.TARGET_COLOR}
 
-Only user-service was built and deployed.
+Deployment strategy:
+  user-service = Blue/Green + CPU-only HPA
 
-Other microservices were NOT:
-- built
-- pushed
-- applied
-- rolled out
-- modified
+Other microservices:
+  product-service  = NOT TOUCHED
+  cart-service     = NOT TOUCHED
+  order-service    = NOT TOUCHED
+  payment-service  = NOT TOUCHED
+  inventory-service = NOT TOUCHED
+
+Prometheus/Grafana:
+  NOT TOUCHED
 ==============================================
 """
         }
@@ -461,6 +693,8 @@ Jenkins build : ${BUILD_NUMBER}
 Image tag     : ${IMAGE_TAG}
 Current color : ${env.CURRENT_COLOR}
 Target color  : ${env.TARGET_COLOR}
+
+Check the failed stage above.
 ==============================================
 """
         }
