@@ -9,37 +9,25 @@ pipeline {
     }
 
     environment {
-        AWS_REGION   = 'ap-south-1'
-        AWS_ACCOUNT  = '777000838263'
+        AWS_REGION        = 'ap-south-1'
         AWS_DEFAULT_REGION = 'ap-south-1'
+        AWS_ACCOUNT       = '777000838263'
 
-        ECR_REGISTRY = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
-        EKS_CLUSTER  = 'ecommerce-eks'
-        NAMESPACE    = 'nodejs-devops'
+        ECR_REGISTRY      = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+        EKS_CLUSTER       = 'ecommerce-eks'
+        NAMESPACE         = 'nodejs-devops'
 
-        USER_SERVICE = 'user-service'
-        USER_REPO    = 'ecommerce-user-service'
+        USER_SERVICE      = 'user-service'
+        USER_REPO         = 'ecommerce-user-service'
 
-        /*
-         * Jenkins BUILD_NUMBER becomes the Docker image tag.
-         *
-         * Build #1 -> image :1
-         * Build #2 -> image :2
-         * Build #3 -> image :3
-         */
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        IMAGE_TAG         = "${BUILD_NUMBER}"
 
-        GIT_REPO   = 'https://github.com/JeswinDcoutho/Project3.git'
-        GIT_BRANCH = 'master'
+        GIT_REPO          = 'https://github.com/JeswinDcoutho/Project3.git'
+        GIT_BRANCH        = 'master'
     }
 
     stages {
 
-        /*
-         * ============================================================
-         * CHECKOUT
-         * ============================================================
-         */
         stage('Checkout') {
             steps {
                 checkout([
@@ -69,11 +57,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * AWS LOGIN / EKS CONFIGURATION
-         * ============================================================
-         */
         stage('AWS Login') {
             steps {
                 withCredentials([
@@ -122,11 +105,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * BUILD USER-SERVICE ONLY
-         * ============================================================
-         */
         stage('Build user-service Image') {
             steps {
                 sh '''
@@ -142,6 +120,7 @@ pipeline {
 
                     echo
                     echo "Docker image created:"
+
                     docker images \
                       "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
                 '''
@@ -149,18 +128,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * PUSH USER-SERVICE ONLY
-         *
-         * IMPORTANT:
-         * The AWS credential binding is kept around BOTH:
-         *   docker push
-         *   aws ecr describe-images
-         *
-         * This fixes the NoCredentials failure from the previous run.
-         * ============================================================
-         */
         stage('Push user-service Image') {
             steps {
                 withCredentials([
@@ -198,16 +165,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * CREATE / UPDATE DATABASE SECRET
-         *
-         * The secret is created from the Jenkins credential:
-         *   rds-db-password
-         *
-         * Password is NEVER printed.
-         * ============================================================
-         */
         stage('Ensure Database Secret') {
             steps {
                 withCredentials([
@@ -241,21 +198,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * DETERMINE ACTIVE COLOR
-         *
-         * Example:
-         *
-         * Current = green
-         * Target  = blue
-         *
-         * OR
-         *
-         * Current = blue
-         * Target  = green
-         * ============================================================
-         */
         stage('Determine Active Color') {
             steps {
                 withCredentials([
@@ -298,11 +240,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * PREPARE BLUE/GREEN TARGET
-         * ============================================================
-         */
         stage('Prepare Blue-Green Target') {
             steps {
                 withCredentials([
@@ -326,12 +263,20 @@ pipeline {
                         echo "=============================================="
 
                         echo
-                        echo "Clearing any stale target replicas..."
+                        echo "Checking whether target deployment exists..."
 
-                        kubectl scale deployment "${TARGET_DEPLOYMENT}" \
-                          -n "${NAMESPACE}" \
-                          --replicas=0 \
-                          --ignore-not-found=true || true
+                        if kubectl get deployment "${TARGET_DEPLOYMENT}" \
+                            -n "${NAMESPACE}" >/dev/null 2>&1; then
+
+                            echo "Target deployment exists."
+                            echo "Scaling it to zero before update..."
+
+                            kubectl scale deployment "${TARGET_DEPLOYMENT}" \
+                              -n "${NAMESPACE}" \
+                              --replicas=0
+                        else
+                            echo "Target deployment does not exist."
+                        fi
 
                         echo
                         echo "Applying target manifest..."
@@ -357,6 +302,7 @@ pipeline {
 
                         echo
                         echo "Target deployment:"
+
                         kubectl get deployment "${TARGET_DEPLOYMENT}" \
                           -n "${NAMESPACE}" \
                           -o wide
@@ -366,11 +312,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * WAIT FOR TARGET
-         * ============================================================
-         */
         stage('Wait for Target') {
             steps {
                 withCredentials([
@@ -396,6 +337,7 @@ pipeline {
 
                         echo
                         echo "Target pods:"
+
                         kubectl get pods \
                           -n "${NAMESPACE}" \
                           -l "app=user-service,version=${TARGET_COLOR}" \
@@ -403,6 +345,7 @@ pipeline {
 
                         echo
                         echo "Target deployment:"
+
                         kubectl get deployment "${TARGET_DEPLOYMENT}" \
                           -n "${NAMESPACE}" \
                           -o wide
@@ -412,11 +355,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * SWITCH TRAFFIC
-         * ============================================================
-         */
         stage('Switch Traffic') {
             steps {
                 withCredentials([
@@ -433,10 +371,26 @@ pipeline {
                         echo "Traffic:"
                         echo "  ${CURRENT_COLOR} -> ${TARGET_COLOR}"
 
+                        cat > /tmp/user-service-bg-patch.json <<PATCH
+{
+  "spec": {
+    "selector": {
+      "app": "user-service",
+      "version": "${TARGET_COLOR}"
+    }
+  }
+}
+PATCH
+
+                        echo
+                        echo "Applying service selector patch..."
+
                         kubectl patch service user-service-bg \
                           -n "${NAMESPACE}" \
                           --type=merge \
-                          -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${TARGET_COLOR}\"}}}"
+                          --patch-file=/tmp/user-service-bg-patch.json
+
+                        rm -f /tmp/user-service-bg-patch.json
 
                         echo
                         echo "New service selector:"
@@ -446,7 +400,6 @@ pipeline {
                           -o jsonpath='{.spec.selector}'
 
                         echo
-
                         echo
                         echo "Traffic successfully switched to ${TARGET_COLOR}."
                     '''
@@ -455,14 +408,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * CPU-ONLY HPA
-         *
-         * First apply the HPA manifest.
-         * Then dynamically point it at the active target deployment.
-         * ============================================================
-         */
         stage('Apply CPU-only HPA') {
             steps {
                 withCredentials([
@@ -486,19 +431,35 @@ pipeline {
                         echo "Retargeting HPA to:"
                         echo "${TARGET_DEPLOYMENT}"
 
+                        cat > /tmp/user-service-hpa-patch.json <<PATCH
+{
+  "spec": {
+    "scaleTargetRef": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "${TARGET_DEPLOYMENT}"
+    }
+  }
+}
+PATCH
+
                         kubectl patch hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           --type=merge \
-                          -p "{\"spec\":{\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"${TARGET_DEPLOYMENT}\"}}}"
+                          --patch-file=/tmp/user-service-hpa-patch.json
+
+                        rm -f /tmp/user-service-hpa-patch.json
 
                         echo
                         echo "HPA:"
+
                         kubectl get hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           -o wide
 
                         echo
                         echo "HPA target:"
+
                         kubectl get hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           -o jsonpath='{.spec.scaleTargetRef.name}'
@@ -507,6 +468,7 @@ pipeline {
 
                         echo
                         echo "HPA metrics:"
+
                         kubectl get hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           -o jsonpath='{.spec.metrics}'
@@ -518,11 +480,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * DEACTIVATE OLD COLOR
-         * ============================================================
-         */
         stage('Deactivate Old Color') {
             steps {
                 withCredentials([
@@ -544,9 +501,15 @@ pipeline {
                         echo
                         echo "Scaling old color to zero..."
 
-                        kubectl scale deployment "${OLD_DEPLOYMENT}" \
-                          -n "${NAMESPACE}" \
-                          --replicas=0
+                        if kubectl get deployment "${OLD_DEPLOYMENT}" \
+                            -n "${NAMESPACE}" >/dev/null 2>&1; then
+
+                            kubectl scale deployment "${OLD_DEPLOYMENT}" \
+                              -n "${NAMESPACE}" \
+                              --replicas=0
+                        else
+                            echo "Old deployment does not exist."
+                        fi
 
                         echo
                         echo "Blue/Green deployment state:"
@@ -562,11 +525,6 @@ pipeline {
         }
 
 
-        /*
-         * ============================================================
-         * FINAL VERIFICATION
-         * ============================================================
-         */
         stage('Final Verification') {
             steps {
                 withCredentials([
@@ -582,19 +540,23 @@ pipeline {
 
                         echo
                         echo "1. Service:"
+
                         kubectl get service user-service-bg \
                           -n "${NAMESPACE}" \
                           -o wide
 
                         echo
                         echo "2. Service selector:"
+
                         kubectl get service user-service-bg \
                           -n "${NAMESPACE}" \
                           -o jsonpath='{.spec.selector}'
+
                         echo
 
                         echo
                         echo "3. Deployments:"
+
                         kubectl get deployment \
                           user-service-blue \
                           user-service-green \
@@ -603,6 +565,7 @@ pipeline {
 
                         echo
                         echo "4. Pods:"
+
                         kubectl get pods \
                           -n "${NAMESPACE}" \
                           -l app=user-service \
@@ -610,39 +573,46 @@ pipeline {
 
                         echo
                         echo "5. HPA:"
+
                         kubectl get hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           -o wide
 
                         echo
                         echo "6. HPA target:"
+
                         kubectl get hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           -o jsonpath='{.spec.scaleTargetRef.name}'
+
                         echo
 
                         echo
                         echo "7. HPA metrics:"
+
                         kubectl get hpa user-service-hpa \
                           -n "${NAMESPACE}" \
                           -o jsonpath='{.spec.metrics}'
+
                         echo
 
                         echo
                         echo "8. Active image:"
+
                         kubectl get deployment \
                           "user-service-${TARGET_COLOR}" \
                           -n "${NAMESPACE}" \
                           -o jsonpath='{.spec.template.spec.containers[0].image}'
+
                         echo
 
                         echo
                         echo "=============================================="
                         echo "FINAL STATE"
                         echo "=============================================="
-                        echo "Current color before deployment : ${CURRENT_COLOR}"
-                        echo "New active color                : ${TARGET_COLOR}"
-                        echo "Image tag                       : ${IMAGE_TAG}"
+                        echo "Previous color : ${CURRENT_COLOR}"
+                        echo "Active color   : ${TARGET_COLOR}"
+                        echo "Image tag      : ${IMAGE_TAG}"
                         echo "=============================================="
                     '''
                 }
@@ -651,11 +621,6 @@ pipeline {
     }
 
 
-    /*
-     * ================================================================
-     * POST ACTIONS
-     * ================================================================
-     */
     post {
 
         success {
@@ -665,21 +630,21 @@ USER-SERVICE PIPELINE SUCCESSFUL
 ==============================================
 Jenkins build : ${BUILD_NUMBER}
 Image tag     : ${IMAGE_TAG}
-Current color : ${env.CURRENT_COLOR}
-Target color  : ${env.TARGET_COLOR}
+Previous color: ${env.CURRENT_COLOR}
+Active color  : ${env.TARGET_COLOR}
 
-Deployment strategy:
+Deployment:
   user-service = Blue/Green + CPU-only HPA
 
-Other microservices:
+Other services:
   product-service  = NOT TOUCHED
   cart-service     = NOT TOUCHED
   order-service    = NOT TOUCHED
   payment-service  = NOT TOUCHED
   inventory-service = NOT TOUCHED
 
-Prometheus/Grafana:
-  NOT TOUCHED
+Monitoring:
+  Prometheus/Grafana = NOT TOUCHED
 ==============================================
 """
         }
