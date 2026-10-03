@@ -1,43 +1,42 @@
 pipeline {
+
     agent any
 
     options {
         timestamps()
-        disableConcurrentBuilds()
-        skipDefaultCheckout(true)
         timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
     }
 
     environment {
-        AWS_REGION        = 'ap-south-1'
-        AWS_DEFAULT_REGION = 'ap-south-1'
-        AWS_ACCOUNT       = '777000838263'
+        AWS_REGION       = 'ap-south-1'
+        EKS_CLUSTER      = 'ecommerce-eks'
+        NAMESPACE        = 'nodejs-devops'
 
-        ECR_REGISTRY      = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
-        EKS_CLUSTER       = 'ecommerce-eks'
-        NAMESPACE         = 'nodejs-devops'
+        AWS_ACCOUNT_ID   = '777000838263'
+        ECR_REGISTRY     = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_REPOSITORY   = 'ecommerce-user-service'
 
-        USER_SERVICE      = 'user-service'
-        USER_REPO         = 'ecommerce-user-service'
+        IMAGE_TAG        = "${BUILD_NUMBER}"
 
-        IMAGE_TAG         = "${BUILD_NUMBER}"
-
-        GIT_REPO          = 'https://github.com/JeswinDcoutho/Project3.git'
-        GIT_BRANCH        = 'master'
+        CURRENT_COLOR    = ''
+        TARGET_COLOR     = ''
     }
 
     stages {
+
+        // ============================================================
+        // CHECKOUT
+        // ============================================================
 
         stage('Checkout') {
             steps {
                 checkout([
                     $class: 'GitSCM',
-                    branches: [[name: "*/${GIT_BRANCH}"]],
-                    doGenerateSubmoduleConfigurations: false,
-                    extensions: [],
+                    branches: [[name: '*/master']],
                     userRemoteConfigs: [[
-                        credentialsId: 'github',
-                        url: "${GIT_REPO}"
+                        url: 'https://github.com/JeswinDcoutho/Project3.git',
+                        credentialsId: 'github'
                     ]]
                 ])
 
@@ -47,15 +46,22 @@ pipeline {
                     echo "=============================================="
                     echo "USER-SERVICE ONLY BLUE/GREEN PIPELINE"
                     echo "=============================================="
+
                     echo "Jenkins build : ${BUILD_NUMBER}"
                     echo "Image tag     : ${IMAGE_TAG}"
                     echo "Git branch    : ${GIT_BRANCH}"
+
                     echo "Git commit    : $(git rev-parse --short HEAD)"
+
                     echo "=============================================="
                 '''
             }
         }
 
+
+        // ============================================================
+        // AWS LOGIN
+        // ============================================================
 
         stage('AWS Login') {
             steps {
@@ -77,25 +83,22 @@ pipeline {
                         echo "Configuring EKS kubeconfig..."
 
                         aws eks update-kubeconfig \
-                          --name "${EKS_CLUSTER}" \
-                          --region "${AWS_REGION}"
+                            --name "${EKS_CLUSTER}" \
+                            --region "${AWS_REGION}"
 
                         echo
-                        echo "EKS context:"
-                        kubectl config current-context
+                        echo "Testing Kubernetes access..."
 
-                        echo
-                        echo "Checking namespace:"
-                        kubectl get namespace "${NAMESPACE}"
+                        kubectl get nodes
 
                         echo
                         echo "Logging in to ECR..."
 
                         aws ecr get-login-password \
-                          --region "${AWS_REGION}" | \
-                          docker login \
-                          --username AWS \
-                          --password-stdin "${ECR_REGISTRY}"
+                            --region "${AWS_REGION}" \
+                            | docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
 
                         echo
                         echo "AWS / EKS / ECR authentication successful."
@@ -104,6 +107,10 @@ pipeline {
             }
         }
 
+
+        // ============================================================
+        // BUILD USER-SERVICE IMAGE
+        // ============================================================
 
         stage('Build user-service Image') {
             steps {
@@ -114,19 +121,26 @@ pipeline {
                     echo "BUILDING USER-SERVICE ONLY"
                     echo "=============================================="
 
+                    echo "Image:"
+                    echo "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
                     docker build \
-                      -t "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}" \
-                      ./user-service
+                        -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" \
+                        ./user-service
 
                     echo
                     echo "Docker image created:"
 
                     docker images \
-                      "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
+                        "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
                 '''
             }
         }
 
+
+        // ============================================================
+        // PUSH USER-SERVICE IMAGE
+        // ============================================================
 
         stage('Push user-service Image') {
             steps {
@@ -141,21 +155,27 @@ pipeline {
                         echo "PUSHING USER-SERVICE ONLY"
                         echo "=============================================="
 
-                        echo "Repository : ${USER_REPO}"
+                        echo "Repository : ${ECR_REPOSITORY}"
                         echo "Image tag  : ${IMAGE_TAG}"
 
+                        aws ecr get-login-password \
+                            --region "${AWS_REGION}" \
+                            | docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
+
                         docker push \
-                          "${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
+                            "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
                         echo
                         echo "Verifying ECR image..."
 
                         aws ecr describe-images \
-                          --repository-name "${USER_REPO}" \
-                          --image-ids imageTag="${IMAGE_TAG}" \
-                          --region "${AWS_REGION}" \
-                          --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest}' \
-                          --output table
+                            --repository-name "${ECR_REPOSITORY}" \
+                            --image-ids imageTag="${IMAGE_TAG}" \
+                            --region "${AWS_REGION}" \
+                            --query 'imageDetails[0].{tag:imageTags[0],digest:imageDigest}' \
+                            --output table
 
                         echo
                         echo "ECR verification successful."
@@ -164,6 +184,10 @@ pipeline {
             }
         }
 
+
+        // ============================================================
+        // DATABASE SECRET
+        // ============================================================
 
         stage('Ensure Database Secret') {
             steps {
@@ -184,19 +208,24 @@ pipeline {
                         echo "=============================================="
 
                         kubectl create secret generic ecommerce-db-secret \
-                          -n "${NAMESPACE}" \
-                          --from-literal=POSTGRES_USER='ecommerce' \
-                          --from-literal=POSTGRES_PASSWORD="$RDS_DB_PASSWORD" \
-                          --dry-run=client \
-                          -o yaml | \
-                        kubectl apply -f -
+                            -n "${NAMESPACE}" \
+                            --from-literal=POSTGRES_USER=ecommerce \
+                            --from-literal=POSTGRES_PASSWORD="${RDS_DB_PASSWORD}" \
+                            --dry-run=client \
+                            -o yaml \
+                        | kubectl apply -f -
 
+                        echo
                         echo "Database secret is ready."
                     '''
                 }
             }
         }
 
+
+        // ============================================================
+        // DETERMINE ACTIVE COLOR
+        // ============================================================
 
         stage('Determine Active Color') {
             steps {
@@ -205,28 +234,32 @@ pipeline {
                      credentialsId: 'aws-terraform-user']
                 ]) {
                     script {
+
                         def activeColor = sh(
                             script: '''
                                 set -e
 
                                 kubectl get service user-service-bg \
-                                  -n "${NAMESPACE}" \
-                                  -o jsonpath='{.spec.selector.version}'
+                                    -n "${NAMESPACE}" \
+                                    -o jsonpath='{.spec.selector.version}'
                             ''',
                             returnStdout: true
                         ).trim()
 
                         if (activeColor != 'blue' && activeColor != 'green') {
                             error(
-                                "Unable to determine active user-service color: '${activeColor}'"
+                                "Invalid active color '${activeColor}'. " +
+                                "Expected blue or green."
                             )
                         }
 
-                        def targetColor =
-                            (activeColor == 'blue') ? 'green' : 'blue'
-
                         env.CURRENT_COLOR = activeColor
-                        env.TARGET_COLOR  = targetColor
+
+                        if (activeColor == 'blue') {
+                            env.TARGET_COLOR = 'green'
+                        } else {
+                            env.TARGET_COLOR = 'blue'
+                        }
 
                         echo "=============================================="
                         echo "BLUE/GREEN COLOR DECISION"
@@ -239,6 +272,10 @@ pipeline {
             }
         }
 
+
+        // ============================================================
+        // PREPARE TARGET COLOR
+        // ============================================================
 
         stage('Prepare Blue-Green Target') {
             steps {
@@ -255,12 +292,11 @@ pipeline {
                         echo "=============================================="
                         echo "PREPARING BLUE/GREEN TARGET"
                         echo "=============================================="
+
                         echo "Current color : ${CURRENT_COLOR}"
                         echo "Target color  : ${TARGET_COLOR}"
                         echo "Deployment    : ${TARGET_DEPLOYMENT}"
                         echo "Manifest      : ${TARGET_MANIFEST}"
-                        echo "Image         : ${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}"
-                        echo "=============================================="
 
                         echo
                         echo "Checking whether target deployment exists..."
@@ -269,48 +305,53 @@ pipeline {
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
 
                             echo "Target deployment exists."
-                            echo "Scaling it to zero before update..."
+                            echo "Scaling target deployment to zero..."
 
                             kubectl scale deployment "${TARGET_DEPLOYMENT}" \
-                              -n "${NAMESPACE}" \
-                              --replicas=0
+                                -n "${NAMESPACE}" \
+                                --replicas=0
+
                         else
                             echo "Target deployment does not exist."
+                            echo "It will be created from the manifest."
                         fi
 
                         echo
                         echo "Applying target manifest..."
 
                         kubectl apply \
-                          -f "${TARGET_MANIFEST}" \
-                          -n "${NAMESPACE}"
+                            -f "${TARGET_MANIFEST}" \
+                            -n "${NAMESPACE}"
 
                         echo
                         echo "Setting image..."
 
-                        kubectl set image \
-                          deployment/"${TARGET_DEPLOYMENT}" \
-                          "${USER_SERVICE}=${ECR_REGISTRY}/${USER_REPO}:${IMAGE_TAG}" \
-                          -n "${NAMESPACE}"
+                        kubectl set image deployment/"${TARGET_DEPLOYMENT}" \
+                            user-service="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" \
+                            -n "${NAMESPACE}"
 
                         echo
-                        echo "Scaling target to one replica..."
+                        echo "Scaling target deployment to 1..."
 
                         kubectl scale deployment "${TARGET_DEPLOYMENT}" \
-                          -n "${NAMESPACE}" \
-                          --replicas=1
+                            -n "${NAMESPACE}" \
+                            --replicas=1
 
                         echo
-                        echo "Target deployment:"
+                        echo "Target deployment configured."
 
                         kubectl get deployment "${TARGET_DEPLOYMENT}" \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -o wide
                     '''
                 }
             }
         }
 
+
+        // ============================================================
+        // WAIT FOR TARGET
+        // ============================================================
 
         stage('Wait for Target') {
             steps {
@@ -324,36 +365,46 @@ pipeline {
                         TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
                         echo "=============================================="
-                        echo "WAITING FOR TARGET"
+                        echo "WAITING FOR TARGET DEPLOYMENT"
                         echo "=============================================="
 
-                        kubectl rollout status \
-                          deployment/"${TARGET_DEPLOYMENT}" \
-                          -n "${NAMESPACE}" \
-                          --timeout=5m
+                        echo "Deployment:"
+                        echo "${TARGET_DEPLOYMENT}"
 
                         echo
-                        echo "Target rollout successful."
+                        echo "Waiting for rollout..."
+
+                        kubectl rollout status \
+                            deployment/"${TARGET_DEPLOYMENT}" \
+                            -n "${NAMESPACE}" \
+                            --timeout=300s
+
+                        echo
+                        echo "Target deployment is ready."
 
                         echo
                         echo "Target pods:"
 
                         kubectl get pods \
-                          -n "${NAMESPACE}" \
-                          -l "app=user-service,version=${TARGET_COLOR}" \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -l app=user-service,version="${TARGET_COLOR}" \
+                            -o wide
 
                         echo
                         echo "Target deployment:"
 
                         kubectl get deployment "${TARGET_DEPLOYMENT}" \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -o wide
                     '''
                 }
             }
         }
 
+
+        // ============================================================
+        // SWITCH SERVICE TRAFFIC
+        // ============================================================
 
         stage('Switch Traffic') {
             steps {
@@ -386,9 +437,9 @@ PATCH
                         echo "Applying service selector patch..."
 
                         kubectl patch service user-service-bg \
-                          -n "${NAMESPACE}" \
-                          --type=merge \
-                          --patch-file=/tmp/user-service-bg-patch.json
+                            -n "${NAMESPACE}" \
+                            --type=merge \
+                            --patch-file=/tmp/user-service-bg-patch.json
 
                         rm -f /tmp/user-service-bg-patch.json
 
@@ -396,17 +447,22 @@ PATCH
                         echo "New service selector:"
 
                         kubectl get service user-service-bg \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.selector}'
+                            -n "${NAMESPACE}" \
+                            -o jsonpath='{.spec.selector}'
 
                         echo
                         echo
+
                         echo "Traffic successfully switched to ${TARGET_COLOR}."
                     '''
                 }
             }
         }
 
+
+        // ============================================================
+        // CPU-ONLY HPA
+        // ============================================================
 
         stage('Apply CPU-only HPA') {
             steps {
@@ -423,13 +479,20 @@ PATCH
                         echo "APPLYING CPU-ONLY HPA"
                         echo "=============================================="
 
-                        kubectl apply \
-                          -f k8s/user-service-hpa.yaml \
-                          -n "${NAMESPACE}"
+                        echo "HPA target : ${TARGET_DEPLOYMENT}"
+                        echo "CPU target : 70%"
+                        echo "Min pods   : 1"
+                        echo "Max pods   : 2"
 
                         echo
-                        echo "Retargeting HPA to:"
-                        echo "${TARGET_DEPLOYMENT}"
+                        echo "Applying HPA manifest..."
+
+                        kubectl apply \
+                            -f k8s/user-hpa.yaml \
+                            -n "${NAMESPACE}"
+
+                        echo
+                        echo "Retargeting HPA..."
 
                         cat > /tmp/user-service-hpa-patch.json <<PATCH
 {
@@ -444,34 +507,34 @@ PATCH
 PATCH
 
                         kubectl patch hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          --type=merge \
-                          --patch-file=/tmp/user-service-hpa-patch.json
+                            -n "${NAMESPACE}" \
+                            --type=merge \
+                            --patch-file=/tmp/user-service-hpa-patch.json
 
                         rm -f /tmp/user-service-hpa-patch.json
 
                         echo
-                        echo "HPA:"
+                        echo "HPA configuration:"
 
                         kubectl get hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -o wide
 
                         echo
                         echo "HPA target:"
 
                         kubectl get hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.scaleTargetRef.name}'
+                            -n "${NAMESPACE}" \
+                            -o jsonpath='{.spec.scaleTargetRef.name}'
 
                         echo
-
                         echo
+
                         echo "HPA metrics:"
 
                         kubectl get hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.metrics}'
+                            -n "${NAMESPACE}" \
+                            -o jsonpath='{.spec.metrics}'
 
                         echo
                     '''
@@ -479,6 +542,10 @@ PATCH
             }
         }
 
+
+        // ============================================================
+        // DEACTIVATE OLD COLOR
+        // ============================================================
 
         stage('Deactivate Old Color') {
             steps {
@@ -499,31 +566,40 @@ PATCH
                         echo "${OLD_DEPLOYMENT}"
 
                         echo
-                        echo "Scaling old color to zero..."
 
                         if kubectl get deployment "${OLD_DEPLOYMENT}" \
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
 
+                            echo "Old deployment exists."
+                            echo "Scaling old color to zero..."
+
                             kubectl scale deployment "${OLD_DEPLOYMENT}" \
-                              -n "${NAMESPACE}" \
-                              --replicas=0
+                                -n "${NAMESPACE}" \
+                                --replicas=0
+
+                            echo "Old color scaled to zero."
+
                         else
                             echo "Old deployment does not exist."
+                            echo "Nothing to deactivate."
                         fi
 
                         echo
                         echo "Blue/Green deployment state:"
 
-                        kubectl get deployment \
-                          user-service-blue \
-                          user-service-green \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                        kubectl get deployments \
+                            -n "${NAMESPACE}" \
+                            -l app=user-service \
+                            -o wide
                     '''
                 }
             }
         }
 
+
+        // ============================================================
+        // FINAL VERIFICATION
+        // ============================================================
 
         stage('Final Verification') {
             steps {
@@ -535,84 +611,77 @@ PATCH
                         set -e
 
                         echo "=============================================="
-                        echo "FINAL USER-SERVICE VERIFICATION"
+                        echo "FINAL VERIFICATION"
                         echo "=============================================="
 
                         echo
-                        echo "1. Service:"
-
+                        echo "1. Service selector:"
                         kubectl get service user-service-bg \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -o jsonpath='{.spec.selector}'
 
                         echo
-                        echo "2. Service selector:"
-
-                        kubectl get service user-service-bg \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.selector}'
-
                         echo
 
-                        echo
-                        echo "3. Deployments:"
+                        echo "2. User-service deployments:"
 
-                        kubectl get deployment \
-                          user-service-blue \
-                          user-service-green \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                        kubectl get deployments \
+                            -n "${NAMESPACE}" \
+                            -l app=user-service \
+                            -o wide
 
                         echo
-                        echo "4. Pods:"
+                        echo "3. User-service pods:"
 
                         kubectl get pods \
-                          -n "${NAMESPACE}" \
-                          -l app=user-service \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -l app=user-service \
+                            -o wide
 
                         echo
-                        echo "5. HPA:"
+                        echo "4. HPA:"
 
                         kubectl get hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          -o wide
+                            -n "${NAMESPACE}" \
+                            -o wide
 
                         echo
-                        echo "6. HPA target:"
+                        echo "5. HPA target:"
 
                         kubectl get hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.scaleTargetRef.name}'
+                            -n "${NAMESPACE}" \
+                            -o jsonpath='{.spec.scaleTargetRef.name}'
 
                         echo
-
                         echo
-                        echo "7. HPA metrics:"
+
+                        echo "6. HPA metrics:"
 
                         kubectl get hpa user-service-hpa \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.metrics}'
+                            -n "${NAMESPACE}" \
+                            -o jsonpath='{.spec.metrics}'
 
                         echo
-
                         echo
-                        echo "8. Active image:"
 
-                        kubectl get deployment \
-                          "user-service-${TARGET_COLOR}" \
-                          -n "${NAMESPACE}" \
-                          -o jsonpath='{.spec.template.spec.containers[0].image}'
+                        echo "7. Service endpoints:"
 
-                        echo
+                        kubectl get endpoints user-service-bg \
+                            -n "${NAMESPACE}" \
+                            -o wide
 
                         echo
                         echo "=============================================="
-                        echo "FINAL STATE"
+                        echo "FINAL VERIFICATION SUCCESSFUL"
                         echo "=============================================="
-                        echo "Previous color : ${CURRENT_COLOR}"
-                        echo "Active color   : ${TARGET_COLOR}"
-                        echo "Image tag      : ${IMAGE_TAG}"
+
+                        echo "Active color : ${TARGET_COLOR}"
+                        echo "Image tag    : ${IMAGE_TAG}"
+                        echo "HPA target   : user-service-${TARGET_COLOR}"
+                        echo "CPU target   : 70%"
+                        echo "Min replicas : 1"
+                        echo "Max replicas : 2"
+
                         echo "=============================================="
                     '''
                 }
@@ -621,30 +690,53 @@ PATCH
     }
 
 
+    // ================================================================
+    // POST ACTIONS
+    // ================================================================
+
     post {
+
+        always {
+            sh '''
+                docker logout "${ECR_REGISTRY}" || true
+                docker image prune -f || true
+            '''
+        }
 
         success {
             echo """
 ==============================================
 USER-SERVICE PIPELINE SUCCESSFUL
 ==============================================
+
 Jenkins build : ${BUILD_NUMBER}
 Image tag     : ${IMAGE_TAG}
-Previous color: ${env.CURRENT_COLOR}
-Active color  : ${env.TARGET_COLOR}
 
-Deployment:
-  user-service = Blue/Green + CPU-only HPA
+Current color : ${CURRENT_COLOR}
+Target color  : ${TARGET_COLOR}
+
+Active deployment:
+user-service-${TARGET_COLOR}
+
+HPA:
+user-service-hpa
+
+CPU target:
+70%
+
+Min replicas:
+1
+
+Max replicas:
+2
 
 Other services:
-  product-service  = NOT TOUCHED
-  cart-service     = NOT TOUCHED
-  order-service    = NOT TOUCHED
-  payment-service  = NOT TOUCHED
-  inventory-service = NOT TOUCHED
+product-service = NOT TOUCHED
+cart-service    = NOT TOUCHED
+order-service   = NOT TOUCHED
+payment-service = NOT TOUCHED
+inventory-service = NOT TOUCHED
 
-Monitoring:
-  Prometheus/Grafana = NOT TOUCHED
 ==============================================
 """
         }
@@ -654,21 +746,18 @@ Monitoring:
 ==============================================
 USER-SERVICE PIPELINE FAILED
 ==============================================
+
 Jenkins build : ${BUILD_NUMBER}
 Image tag     : ${IMAGE_TAG}
-Current color : ${env.CURRENT_COLOR}
-Target color  : ${env.TARGET_COLOR}
+
+Current color : ${CURRENT_COLOR}
+Target color  : ${TARGET_COLOR}
 
 Check the failed stage above.
+
 ==============================================
 """
         }
-
-        always {
-            sh '''
-                docker logout "${ECR_REGISTRY}" >/dev/null 2>&1 || true
-                docker image prune -f >/dev/null 2>&1 || true
-            '''
-        }
     }
 }
+
