@@ -2,92 +2,48 @@ pipeline {
 
     agent any
 
-    options {
-        timestamps()
-        disableConcurrentBuilds()
-        skipDefaultCheckout(true)
-    }
-
     environment {
-
-        // ============================================================
-        // AWS / EKS
-        // ============================================================
-
         AWS_REGION = 'ap-south-1'
-        AWS_ACCOUNT_ID = '777000838263'
         EKS_CLUSTER = 'ecommerce-eks'
         NAMESPACE = 'nodejs-devops'
 
-
-        // ============================================================
-        // ECR
-        // ============================================================
-
+        AWS_ACCOUNT_ID = '777000838263'
         ECR_REGISTRY = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
         USER_IMAGE = 'ecommerce-user-service'
 
-
-        // ============================================================
-        // Git
-        // ============================================================
-
-        GIT_BRANCH = 'master'
-
-
-        // ============================================================
-        // Kubernetes
-        // ============================================================
+        RDS_HOST = 'ecommerce-postgres.c7u8o4skoxo.ap-south-1.rds.amazonaws.com'
+        RDS_PORT = '5432'
+        RDS_DB = 'ecommerce'
+        RDS_USER = 'postgres'
 
         USER_SERVICE = 'user-service'
-        USER_SERVICE_BG = 'user-service-bg'
+        USER_BG_SERVICE = 'user-service-bg'
 
-
-        // ============================================================
-        // IMPORTANT:
-        // Do NOT leave these empty.
-        // They are changed later with env.CURRENT_COLOR and
-        // env.TARGET_COLOR.
-        // ============================================================
-
-        CURRENT_COLOR = 'unknown'
-        TARGET_COLOR = 'unknown'
-
-        SMOKE_TEST_FAILED = 'false'
-        ROLLBACK_PERFORMED = 'false'
+        HPA_NAME = 'user-service-hpa'
+        HPA_CPU_TARGET = '70'
+        HPA_MIN_REPLICAS = '1'
+        HPA_MAX_REPLICAS = '2'
     }
 
-
     stages {
-
 
         // ============================================================
         // CHECKOUT
         // ============================================================
 
         stage('Checkout') {
-
             steps {
-
-                echo '=============================================='
-                echo 'CHECKOUT'
-                echo '=============================================='
+                echo "=============================================="
+                echo "CHECKOUT"
+                echo "=============================================="
 
                 checkout([
                     $class: 'GitSCM',
-
-                    branches: [[
-                        name: "*/${GIT_BRANCH}"
-                    ]],
-
+                    branches: [[name: '*/master']],
                     userRemoteConfigs: [[
                         url: 'https://github.com/JeswinDcoutho/Project3.git',
                         credentialsId: 'github'
-                    ]],
-
-                    extensions: [
-                        [$class: 'CleanBeforeCheckout']
-                    ]
+                    ]]
                 ])
 
                 sh '''
@@ -114,20 +70,29 @@ pipeline {
         // ============================================================
 
         stage('Initialize Blue-Green State') {
-
             steps {
-
                 script {
 
-                    env.CURRENT_COLOR = 'unknown'
-                    env.TARGET_COLOR = 'unknown'
+                    echo "=============================================="
+                    echo "INITIALIZE BLUE/GREEN STATE"
+                    echo "=============================================="
+
+                    /*
+                     * IMPORTANT:
+                     *
+                     * Do NOT define these in the top-level
+                     * environment {} block.
+                     *
+                     * They are runtime state and are populated
+                     * dynamically after Kubernetes is queried.
+                     */
+
+                    env.CURRENT_COLOR = ''
+                    env.TARGET_COLOR = ''
                     env.SMOKE_TEST_FAILED = 'false'
                     env.ROLLBACK_PERFORMED = 'false'
 
-                    echo '=============================================='
-                    echo 'INITIALIZE BLUE/GREEN STATE'
-                    echo '=============================================='
-
+                    echo "Blue/Green state initialized."
                     echo "CURRENT_COLOR=${env.CURRENT_COLOR}"
                     echo "TARGET_COLOR=${env.TARGET_COLOR}"
                 }
@@ -140,14 +105,11 @@ pipeline {
         // ============================================================
 
         stage('AWS Login') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -155,6 +117,7 @@ pipeline {
 
                         echo "=============================================="
                         echo "AWS LOGIN"
+                        echo "=============================================="
                         echo "=============================================="
 
                         aws sts get-caller-identity
@@ -168,12 +131,10 @@ pipeline {
 
                         echo ""
                         echo "EKS context:"
-
                         kubectl config current-context
 
                         echo ""
                         echo "Cluster connectivity:"
-
                         kubectl cluster-info
                     '''
                 }
@@ -186,7 +147,6 @@ pipeline {
         // ============================================================
 
         stage('Build user-service Image') {
-
             steps {
 
                 sh '''
@@ -195,20 +155,22 @@ pipeline {
                     echo "=============================================="
                     echo "BUILD USER-SERVICE IMAGE"
                     echo "=============================================="
+                    echo "=============================================="
+
+                    IMAGE="${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}"
 
                     echo "Image:"
-                    echo "${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}"
+                    echo "${IMAGE}"
 
                     docker build \
-                        -t "${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}" \
+                        -t "${IMAGE}" \
                         ./user-service
 
                     echo ""
                     echo "Docker image built successfully."
 
-                    docker images \
-                        "${ECR_REGISTRY}/${USER_IMAGE}" \
-                        --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
+                    docker images "${ECR_REGISTRY}/${USER_IMAGE}" \
+                        --format 'table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}'
                 '''
             }
         }
@@ -219,14 +181,11 @@ pipeline {
         // ============================================================
 
         stage('Push user-service Image') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -235,6 +194,9 @@ pipeline {
                         echo "=============================================="
                         echo "PUSH USER-SERVICE IMAGE"
                         echo "=============================================="
+                        echo "=============================================="
+
+                        IMAGE="${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}"
 
                         echo "Logging into ECR..."
 
@@ -246,9 +208,9 @@ pipeline {
 
                         echo ""
                         echo "Pushing image:"
+                        echo "${IMAGE}"
 
-                        docker push \
-                            "${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}"
+                        docker push "${IMAGE}"
 
                         echo ""
                         echo "Verifying image in ECR..."
@@ -271,15 +233,12 @@ pipeline {
         // ============================================================
 
         stage('Ensure Database Secret') {
-
             steps {
 
                 withCredentials([
 
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ],
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user'],
 
                     string(
                         credentialsId: 'rds-db-password',
@@ -294,15 +253,16 @@ pipeline {
                         echo "=============================================="
                         echo "ENSURING DATABASE SECRET"
                         echo "=============================================="
+                        echo "=============================================="
 
                         aws sts get-caller-identity >/dev/null
 
                         kubectl create secret generic ecommerce-db-secret \
                             -n "${NAMESPACE}" \
-                            --from-literal=POSTGRES_HOST=ecommerce-postgres.c7u8o4skoxo.ap-south-1.rds.amazonaws.com \
-                            --from-literal=POSTGRES_PORT=5432 \
-                            --from-literal=POSTGRES_DB=ecommerce \
-                            --from-literal=POSTGRES_USER=postgres \
+                            --from-literal=POSTGRES_HOST="${RDS_HOST}" \
+                            --from-literal=POSTGRES_PORT="${RDS_PORT}" \
+                            --from-literal=POSTGRES_DB="${RDS_DB}" \
+                            --from-literal=POSTGRES_USER="${RDS_USER}" \
                             --from-literal=POSTGRES_PASSWORD="${RDS_PASSWORD}" \
                             --dry-run=client \
                             -o yaml |
@@ -327,39 +287,36 @@ pipeline {
         // ============================================================
 
         stage('Determine Active Color') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     script {
 
+                        echo "=============================================="
+                        echo "DETERMINE ACTIVE COLOR"
+                        echo "=============================================="
+                        echo "=============================================="
+
                         sh '''
                             set -e
-
-                            echo "=============================================="
-                            echo "DETERMINE ACTIVE COLOR"
-                            echo "=============================================="
 
                             echo ""
                             echo "Current user-service-bg selector:"
 
-                            kubectl get service "${USER_SERVICE_BG}" \
+                            kubectl get service "${USER_BG_SERVICE}" \
                                 -n "${NAMESPACE}" \
-                                -o jsonpath='{.spec.selector}' || true
+                                -o jsonpath='{.spec.selector}'
 
-                            echo ""
+                            echo
                         '''
-
 
                         def activeColor = sh(
                             script: '''
-                                kubectl get service "${USER_SERVICE_BG}" \
+                                kubectl get service "${USER_BG_SERVICE}" \
                                     -n "${NAMESPACE}" \
                                     -o jsonpath='{.spec.selector.version}' \
                                     2>/dev/null || true
@@ -367,13 +324,11 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-
-                        echo ""
                         echo "Detected service color: '${activeColor}'"
 
 
                         // ------------------------------------------------
-                        // Normal Blue/Green case
+                        // NORMAL BLUE/GREEN SWITCH
                         // ------------------------------------------------
 
                         if (activeColor == 'blue') {
@@ -382,7 +337,6 @@ pipeline {
                             env.TARGET_COLOR = 'green'
 
                         }
-
                         else if (activeColor == 'green') {
 
                             env.CURRENT_COLOR = 'green'
@@ -391,15 +345,12 @@ pipeline {
                         }
 
                         // ------------------------------------------------
-                        // No valid selector found
+                        // RECOVERY / INITIAL DEPLOYMENT LOGIC
                         // ------------------------------------------------
 
                         else {
 
-                            echo ""
-                            echo "No valid service color detected."
-                            echo "Checking existing deployments..."
-
+                            echo "No valid active service color detected."
 
                             def blueExists = sh(
                                 script: '''
@@ -408,8 +359,7 @@ pipeline {
                                         >/dev/null 2>&1
                                 ''',
                                 returnStatus: true
-                            )
-
+                            ) == 0
 
                             def greenExists = sh(
                                 script: '''
@@ -418,60 +368,52 @@ pipeline {
                                         >/dev/null 2>&1
                                 ''',
                                 returnStatus: true
-                            )
+                            ) == 0
 
 
-                            if (blueExists == 0 && greenExists != 0) {
+                            if (blueExists && !greenExists) {
 
                                 env.CURRENT_COLOR = 'blue'
                                 env.TARGET_COLOR = 'green'
 
                             }
-
-                            else if (greenExists == 0 && blueExists != 0) {
+                            else if (greenExists && !blueExists) {
 
                                 env.CURRENT_COLOR = 'green'
                                 env.TARGET_COLOR = 'blue'
 
                             }
-
                             else {
 
-                                // ------------------------------------------------
-                                // Initial deployment.
-                                //
-                                // Blue will be the first deployment.
-                                // We treat green as the "old/nonexistent"
-                                // color and blue as the target.
-                                // ------------------------------------------------
-
+                                /*
+                                 * Initial deployment.
+                                 *
+                                 * No active color exists.
+                                 * Deploy BLUE as the first color.
+                                 */
                                 env.CURRENT_COLOR = 'green'
                                 env.TARGET_COLOR = 'blue'
                             }
                         }
 
 
+                        // ------------------------------------------------
+                        // VALIDATE STATE
+                        // ------------------------------------------------
+
                         echo ""
                         echo "=============================================="
                         echo "BLUE/GREEN STATE"
                         echo "=============================================="
-
                         echo "Current color : ${env.CURRENT_COLOR}"
                         echo "Target color  : ${env.TARGET_COLOR}"
-
                         echo "=============================================="
 
 
-                        // ------------------------------------------------
-                        // Safety validation
-                        // ------------------------------------------------
-
-                        if (
+                        if (!env.CURRENT_COLOR ||
                             env.CURRENT_COLOR == 'unknown' ||
-                            env.TARGET_COLOR == 'unknown' ||
-                            !env.CURRENT_COLOR ||
-                            !env.TARGET_COLOR
-                        ) {
+                            !env.TARGET_COLOR ||
+                            env.TARGET_COLOR == 'unknown') {
 
                             error(
                                 "Blue/Green state initialization failed. " +
@@ -486,18 +428,15 @@ pipeline {
 
 
         // ============================================================
-        // PREPARE TARGET BLUE/GREEN
+        // PREPARE BLUE/GREEN
         // ============================================================
 
         stage('Prepare Blue-Green') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -506,27 +445,38 @@ pipeline {
                         echo "=============================================="
                         echo "PREPARE BLUE/GREEN"
                         echo "=============================================="
+                        echo "=============================================="
 
-                        TARGET_DEPLOYMENT="${USER_SERVICE}-${TARGET_COLOR}"
-                        TARGET_MANIFEST="k8s/${USER_SERVICE}-${TARGET_COLOR}.yaml"
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                        TARGET_MANIFEST="k8s/user-service-${TARGET_COLOR}.yaml"
 
-                        echo "Current color       : ${CURRENT_COLOR}"
-                        echo "Target color        : ${TARGET_COLOR}"
-                        echo "Target deployment   : ${TARGET_DEPLOYMENT}"
-                        echo "Target manifest     : ${TARGET_MANIFEST}"
+                        IMAGE="${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}"
 
-                        echo ""
-                        echo "Checking target manifest..."
-
-                        test -f "${TARGET_MANIFEST}"
+                        echo "Current color : ${CURRENT_COLOR}"
+                        echo "Target color  : ${TARGET_COLOR}"
 
                         echo ""
-                        echo "Checking existing target deployment..."
+                        echo "Target deployment:"
+                        echo "${TARGET_DEPLOYMENT}"
+
+                        echo ""
+                        echo "Target manifest:"
+                        echo "${TARGET_MANIFEST}"
+
+                        echo ""
+                        echo "Image:"
+                        echo "${IMAGE}"
+
+
+                        # ----------------------------------------------
+                        # Ensure target deployment exists
+                        # ----------------------------------------------
 
                         if kubectl get deployment "${TARGET_DEPLOYMENT}" \
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
 
-                            echo "Target deployment exists."
+                            echo ""
+                            echo "Existing target deployment found."
 
                             kubectl scale deployment "${TARGET_DEPLOYMENT}" \
                                 -n "${NAMESPACE}" \
@@ -534,37 +484,48 @@ pipeline {
 
                         else
 
+                            echo ""
                             echo "Target deployment does not exist."
+                            echo "Creating it from manifest..."
+
+                            kubectl apply \
+                                -f "${TARGET_MANIFEST}"
 
                         fi
 
 
-                        echo ""
-                        echo "Applying target deployment manifest..."
-
-                        kubectl apply \
-                            -f "${TARGET_MANIFEST}"
-
+                        # ----------------------------------------------
+                        # Force the requested image
+                        # ----------------------------------------------
 
                         echo ""
-                        echo "Updating image..."
+                        echo "Updating target image..."
 
-                        kubectl set image deployment/"${TARGET_DEPLOYMENT}" \
-                            user-service="${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}" \
+                        kubectl set image \
+                            deployment/"${TARGET_DEPLOYMENT}" \
+                            user-service="${IMAGE}" \
                             -n "${NAMESPACE}"
 
 
+                        # ----------------------------------------------
+                        # Ensure image is always pulled
+                        # ----------------------------------------------
+
                         echo ""
-                        echo "Forcing imagePullPolicy=Always..."
+                        echo "Setting imagePullPolicy=Always..."
 
                         kubectl patch deployment "${TARGET_DEPLOYMENT}" \
                             -n "${NAMESPACE}" \
                             --type='strategic' \
-                            -p='{"spec":{"template":{"spec":{"containers":[{"name":"user-service","imagePullPolicy":"Always"}]}}}}'
+                            -p '{"spec":{"template":{"spec":{"containers":[{"name":"user-service","imagePullPolicy":"Always"}]}}}}'
 
+
+                        # ----------------------------------------------
+                        # Start target deployment
+                        # ----------------------------------------------
 
                         echo ""
-                        echo "Scaling target color to 1 replica..."
+                        echo "Scaling target deployment to 1 replica..."
 
                         kubectl scale deployment "${TARGET_DEPLOYMENT}" \
                             -n "${NAMESPACE}" \
@@ -573,6 +534,11 @@ pipeline {
 
                         echo ""
                         echo "Target deployment prepared."
+
+                        kubectl get deployment "${TARGET_DEPLOYMENT}" \
+                            -n "${NAMESPACE}" \
+                            -o wide
+
                     '''
                 }
             }
@@ -584,14 +550,11 @@ pipeline {
         // ============================================================
 
         stage('Wait for Target') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -600,48 +563,32 @@ pipeline {
                         echo "=============================================="
                         echo "WAIT FOR TARGET"
                         echo "=============================================="
+                        echo "=============================================="
 
-                        TARGET_DEPLOYMENT="${USER_SERVICE}-${TARGET_COLOR}"
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
-                        echo "Waiting for rollout:"
+                        echo "Waiting for deployment:"
                         echo "${TARGET_DEPLOYMENT}"
-
 
                         kubectl rollout status \
                             deployment/"${TARGET_DEPLOYMENT}" \
                             -n "${NAMESPACE}" \
-                            --timeout=300s
-
-
-                        echo ""
-                        echo "Target deployment status:"
-
-                        kubectl get deployment "${TARGET_DEPLOYMENT}" \
-                            -n "${NAMESPACE}" \
-                            -o wide
-
+                            --timeout=180s
 
                         echo ""
-                        echo "Target pods:"
+                        echo "Target deployment rollout successful."
 
                         kubectl get pods \
                             -n "${NAMESPACE}" \
-                            -l "app=${USER_SERVICE},version=${TARGET_COLOR}" \
+                            -l app=user-service,version="${TARGET_COLOR}" \
                             -o wide
 
-
                         echo ""
-                        echo "Waiting for Available condition..."
+                        echo "Target pod status:"
 
-                        kubectl wait \
-                            --for=condition=Available \
-                            deployment/"${TARGET_DEPLOYMENT}" \
+                        kubectl get pods \
                             -n "${NAMESPACE}" \
-                            --timeout=120s
-
-
-                        echo ""
-                        echo "Target color is ready."
+                            -l app=user-service,version="${TARGET_COLOR}"
                     '''
                 }
             }
@@ -653,14 +600,11 @@ pipeline {
         // ============================================================
 
         stage('Switch Traffic') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -669,29 +613,33 @@ pipeline {
                         echo "=============================================="
                         echo "SWITCH TRAFFIC"
                         echo "=============================================="
+                        echo "=============================================="
 
-                        echo "Switching ${USER_SERVICE_BG}"
-                        echo "from ${CURRENT_COLOR}"
-                        echo "to   ${TARGET_COLOR}"
+                        echo "Previous color:"
+                        echo "${CURRENT_COLOR}"
 
+                        echo "New color:"
+                        echo "${TARGET_COLOR}"
 
-                        kubectl patch service "${USER_SERVICE_BG}" \
+                        echo ""
+                        echo "Patching service selector..."
+
+                        kubectl patch service "${USER_BG_SERVICE}" \
                             -n "${NAMESPACE}" \
                             --type='merge' \
-                            -p "{\"spec\":{\"selector\":{\"app\":\"${USER_SERVICE}\",\"version\":\"${TARGET_COLOR}\"}}}"
+                            -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${TARGET_COLOR}\"}}}"
 
 
                         echo ""
                         echo "New service selector:"
 
-                        kubectl get service "${USER_SERVICE_BG}" \
+                        kubectl get service "${USER_BG_SERVICE}" \
                             -n "${NAMESPACE}" \
                             -o jsonpath='{.spec.selector}'
 
+                        echo
 
                         echo ""
-                        echo ""
-
                         echo "Traffic successfully switched to ${TARGET_COLOR}."
                     '''
                 }
@@ -704,14 +652,11 @@ pipeline {
         // ============================================================
 
         stage('Apply CPU-only HPA') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -720,15 +665,18 @@ pipeline {
                         echo "=============================================="
                         echo "APPLY CPU-ONLY HPA"
                         echo "=============================================="
+                        echo "=============================================="
 
-                        TARGET_DEPLOYMENT="${USER_SERVICE}-${TARGET_COLOR}"
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
+                        echo "HPA target:"
+                        echo "${TARGET_DEPLOYMENT}"
 
                         cat > /tmp/user-service-hpa.yaml <<EOF
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: user-service-hpa
+  name: ${HPA_NAME}
   namespace: ${NAMESPACE}
 spec:
   scaleTargetRef:
@@ -736,8 +684,8 @@ spec:
     kind: Deployment
     name: ${TARGET_DEPLOYMENT}
 
-  minReplicas: 1
-  maxReplicas: 2
+  minReplicas: ${HPA_MIN_REPLICAS}
+  maxReplicas: ${HPA_MAX_REPLICAS}
 
   behavior:
     scaleUp:
@@ -762,46 +710,24 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: ${HPA_CPU_TARGET}
 EOF
-
 
                         kubectl apply \
                             -f /tmp/user-service-hpa.yaml
 
+                        echo ""
+                        echo "HPA configured successfully."
+
+                        kubectl get hpa "${HPA_NAME}" \
+                            -n "${NAMESPACE}"
 
                         echo ""
-                        echo "HPA applied."
+                        echo "HPA YAML:"
 
-
-                        echo ""
-                        echo "HPA details:"
-
-                        kubectl get hpa user-service-hpa \
+                        kubectl get hpa "${HPA_NAME}" \
                             -n "${NAMESPACE}" \
-                            -o wide
-
-
-                        echo ""
-                        echo "HPA target:"
-
-                        kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.scaleTargetRef.name}'
-
-
-                        echo ""
-                        echo ""
-
-
-                        echo "HPA metrics:"
-
-                        kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics}'
-
-
-                        echo ""
+                            -o yaml
                     '''
                 }
             }
@@ -813,152 +739,104 @@ EOF
         // ============================================================
 
         stage('Smoke Test') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     script {
+
+                        echo "=============================================="
+                        echo "SMOKE TEST"
+                        echo "=============================================="
+                        echo "=============================================="
 
                         def smokeResult = sh(
                             script: '''
                                 set +e
 
-                                echo "=============================================="
-                                echo "SMOKE TEST"
-                                echo "=============================================="
-
-
-                                TARGET_DEPLOYMENT="${USER_SERVICE}-${TARGET_COLOR}"
-
+                                TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
                                 echo "Testing deployment:"
                                 echo "${TARGET_DEPLOYMENT}"
 
-
-                                POD_NAME=$(kubectl get pods \
+                                POD=$(kubectl get pods \
                                     -n "${NAMESPACE}" \
-                                    -l "app=${USER_SERVICE},version=${TARGET_COLOR}" \
-                                    -o jsonpath='{.items[0].metadata.name}' \
-                                    2>/dev/null)
+                                    -l app=user-service,version="${TARGET_COLOR}" \
+                                    -o jsonpath='{.items[0].metadata.name}')
 
+                                echo ""
+                                echo "Smoke test pod:"
+                                echo "${POD}"
 
-                                if [ -z "${POD_NAME}" ]; then
+                                echo ""
+                                echo "Testing /health ..."
 
+                                kubectl exec \
+                                    -n "${NAMESPACE}" \
+                                    "${POD}" \
+                                    -- sh -c 'curl -fsS http://127.0.0.1:8001/health'
+
+                                if [ $? -eq 0 ]; then
                                     echo ""
-                                    echo "SMOKE TEST FAILED"
-                                    echo "No target pod found."
-
-                                    exit 1
+                                    echo "Health endpoint succeeded."
+                                    exit 0
                                 fi
 
 
                                 echo ""
-                                echo "Target pod:"
-                                echo "${POD_NAME}"
+                                echo "/health failed."
+                                echo "Testing /healthz ..."
 
-
-                                echo ""
-                                echo "Pod status:"
-
-                                kubectl get pod "${POD_NAME}" \
+                                kubectl exec \
                                     -n "${NAMESPACE}" \
-                                    -o wide
+                                    "${POD}" \
+                                    -- sh -c 'curl -fsS http://127.0.0.1:8001/healthz'
 
-
-                                echo ""
-                                echo "Checking pod readiness..."
-
-
-                                READY=$(kubectl get pod "${POD_NAME}" \
-                                    -n "${NAMESPACE}" \
-                                    -o jsonpath='{.status.containerStatuses[0].ready}' \
-                                    2>/dev/null)
-
-
-                                if [ "${READY}" != "true" ]; then
-
+                                if [ $? -eq 0 ]; then
                                     echo ""
-                                    echo "SMOKE TEST FAILED"
-                                    echo "Container is not ready."
-
-                                    exit 1
-                                fi
-
-
-                                echo "Container is Ready."
-
-
-                                echo ""
-                                echo "Checking user-service endpoint..."
-
-
-                                TEST_PASSED="false"
-
-
-                                for ENDPOINT in "/health" "/healthz" "/"; do
-
-                                    echo ""
-                                    echo "Testing ${ENDPOINT}..."
-
-
-                                    kubectl exec \
-                                        "${POD_NAME}" \
-                                        -n "${NAMESPACE}" \
-                                        -- sh -c \
-                                        "curl -fsS --max-time 10 http://127.0.0.1:8001${ENDPOINT} >/dev/null" \
-                                        2>/dev/null
-
-
-                                    if [ $? -eq 0 ]; then
-
-                                        echo "Endpoint ${ENDPOINT} passed."
-
-                                        TEST_PASSED="true"
-
-                                        break
-                                    fi
-
-                                done
-
-
-                                if [ "${TEST_PASSED}" != "true" ]; then
-
-                                    echo ""
-                                    echo "SMOKE TEST FAILED"
-                                    echo "No health endpoint responded successfully."
-
-
-                                    echo ""
-                                    echo "Recent pod logs:"
-
-                                    kubectl logs "${POD_NAME}" \
-                                        -n "${NAMESPACE}" \
-                                        --tail=100 || true
-
-
-                                    exit 1
+                                    echo "Healthz endpoint succeeded."
+                                    exit 0
                                 fi
 
 
                                 echo ""
-                                echo "=============================================="
-                                echo "SMOKE TEST PASSED"
-                                echo "=============================================="
+                                echo "/healthz failed."
+                                echo "Testing root endpoint ..."
+
+                                kubectl exec \
+                                    -n "${NAMESPACE}" \
+                                    "${POD}" \
+                                    -- sh -c 'curl -fsS http://127.0.0.1:8001/'
+
+                                if [ $? -eq 0 ]; then
+                                    echo ""
+                                    echo "Root endpoint succeeded."
+                                    exit 0
+                                fi
 
 
-                                exit 0
+                                echo ""
+                                echo "All smoke tests failed."
+                                exit 1
                             ''',
                             returnStatus: true
                         )
 
 
-                        if (smokeResult != 0) {
+                        if (smokeResult == 0) {
+
+                            env.SMOKE_TEST_FAILED = 'false'
+
+                            echo ""
+                            echo "=============================================="
+                            echo "SMOKE TEST PASSED"
+                            echo "=============================================="
+
+                        }
+                        else {
 
                             env.SMOKE_TEST_FAILED = 'true'
 
@@ -967,17 +845,7 @@ EOF
                             echo "SMOKE TEST FAILED"
                             echo "=============================================="
 
-                            echo ""
-                            echo "Automatic rollback will now be attempted."
-
-                        }
-
-                        else {
-
-                            env.SMOKE_TEST_FAILED = 'false'
-
-                            echo ""
-                            echo "Smoke test passed."
+                            echo "Automatic rollback will be attempted."
                         }
                     }
                 }
@@ -986,11 +854,10 @@ EOF
 
 
         // ============================================================
-        // ROLLBACK IF SMOKE TEST FAILED
+        // ROLLBACK ON FAILURE
         // ============================================================
 
         stage('Rollback on Failure') {
-
             when {
                 expression {
                     return env.SMOKE_TEST_FAILED == 'true'
@@ -1000,75 +867,80 @@ EOF
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     script {
+
+                        echo "=============================================="
+                        echo "AUTOMATIC ROLLBACK"
+                        echo "=============================================="
+                        echo "=============================================="
 
                         def rollbackResult = sh(
                             script: '''
                                 set -e
 
-                                echo "=============================================="
-                                echo "AUTOMATIC ROLLBACK"
-                                echo "=============================================="
+                                FAILED_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                                PREVIOUS_DEPLOYMENT="user-service-${CURRENT_COLOR}"
 
-
-                                OLD_DEPLOYMENT="${USER_SERVICE}-${CURRENT_COLOR}"
-                                FAILED_DEPLOYMENT="${USER_SERVICE}-${TARGET_COLOR}"
-
-
-                                echo "Previous color : ${CURRENT_COLOR}"
-                                echo "Failed color   : ${TARGET_COLOR}"
-
+                                echo "Failed color  : ${TARGET_COLOR}"
+                                echo "Restore color : ${CURRENT_COLOR}"
 
                                 echo ""
-                                echo "Restoring traffic to ${CURRENT_COLOR}..."
+                                echo "Restoring service selector..."
 
-
-                                kubectl patch service "${USER_SERVICE_BG}" \
+                                kubectl patch service "${USER_BG_SERVICE}" \
                                     -n "${NAMESPACE}" \
                                     --type='merge' \
-                                    -p "{\"spec\":{\"selector\":{\"app\":\"${USER_SERVICE}\",\"version\":\"${CURRENT_COLOR}\"}}}"
+                                    -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${CURRENT_COLOR}\"}}}"
 
 
                                 echo ""
-                                echo "Traffic restored."
+                                echo "Service selector after rollback:"
+
+                                kubectl get service "${USER_BG_SERVICE}" \
+                                    -n "${NAMESPACE}" \
+                                    -o jsonpath='{.spec.selector}'
+
+                                echo
 
 
-                                echo ""
-                                echo "Restoring HPA target..."
+                                # ------------------------------------------
+                                # Restore HPA to previous color
+                                # ------------------------------------------
 
-
-                                if kubectl get deployment "${OLD_DEPLOYMENT}" \
+                                if kubectl get deployment "${PREVIOUS_DEPLOYMENT}" \
                                     -n "${NAMESPACE}" >/dev/null 2>&1; then
 
+                                    echo ""
+                                    echo "Restoring HPA target to:"
+                                    echo "${PREVIOUS_DEPLOYMENT}"
 
-                                    kubectl patch hpa user-service-hpa \
+                                    kubectl patch hpa "${HPA_NAME}" \
                                         -n "${NAMESPACE}" \
                                         --type='merge' \
-                                        -p "{\"spec\":{\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"${OLD_DEPLOYMENT}\"}}}"
-
-
-                                    echo "HPA target restored to ${OLD_DEPLOYMENT}."
+                                        -p "{\"spec\":{\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"${PREVIOUS_DEPLOYMENT}\"}}}"
 
                                 else
 
-                                    echo "Previous deployment ${OLD_DEPLOYMENT} does not exist."
+                                    echo ""
+                                    echo "Previous deployment does not exist."
+                                    echo "HPA target restoration skipped."
 
                                 fi
 
 
-                                echo ""
-                                echo "Scaling failed color to 0..."
-
+                                # ------------------------------------------
+                                # Scale failed deployment down
+                                # ------------------------------------------
 
                                 if kubectl get deployment "${FAILED_DEPLOYMENT}" \
                                     -n "${NAMESPACE}" >/dev/null 2>&1; then
 
+                                    echo ""
+                                    echo "Scaling failed deployment to zero:"
 
                                     kubectl scale deployment "${FAILED_DEPLOYMENT}" \
                                         -n "${NAMESPACE}" \
@@ -1076,28 +948,37 @@ EOF
 
                                 else
 
+                                    echo ""
                                     echo "Failed deployment does not exist."
 
                                 fi
 
 
+                                # ------------------------------------------
+                                # Verify rollback
+                                # ------------------------------------------
+
                                 echo ""
                                 echo "Verifying service selector..."
 
-
-                                kubectl get service "${USER_SERVICE_BG}" \
+                                ACTIVE_AFTER_ROLLBACK=$(kubectl get service "${USER_BG_SERVICE}" \
                                     -n "${NAMESPACE}" \
-                                    -o jsonpath='{.spec.selector}'
+                                    -o jsonpath='{.spec.selector.version}')
+
+                                echo "Active color after rollback:"
+                                echo "${ACTIVE_AFTER_ROLLBACK}"
+
+                                if [ "${ACTIVE_AFTER_ROLLBACK}" != "${CURRENT_COLOR}" ]; then
+                                    echo ""
+                                    echo "ERROR: Service rollback verification failed."
+                                    exit 1
+                                fi
 
 
                                 echo ""
-                                echo ""
-
-
                                 echo "Verifying HPA..."
 
-
-                                kubectl get hpa user-service-hpa \
+                                kubectl get hpa "${HPA_NAME}" \
                                     -n "${NAMESPACE}" \
                                     -o wide
 
@@ -1105,20 +986,14 @@ EOF
                                 echo ""
                                 echo "Verifying deployments..."
 
-
-                                kubectl get deployment \
+                                kubectl get deployments \
                                     -n "${NAMESPACE}" \
-                                    -l "app=${USER_SERVICE}" \
+                                    -l app=user-service \
                                     -o wide
 
 
                                 echo ""
-                                echo "=============================================="
-                                echo "ROLLBACK SUCCESSFUL"
-                                echo "=============================================="
-
-
-                                exit 0
+                                echo "Rollback completed successfully."
                             ''',
                             returnStatus: true
                         )
@@ -1129,11 +1004,18 @@ EOF
                             env.ROLLBACK_PERFORMED = 'true'
 
                             echo ""
-                            echo "Rollback completed successfully."
-                            echo "The failed target color has been deactivated."
+                            echo "=============================================="
+                            echo "ROLLBACK SUCCESSFUL"
+                            echo "=============================================="
+
+                            /*
+                             * Important:
+                             *
+                             * Rollback is considered a controlled recovery.
+                             * Jenkins remains SUCCESS if rollback succeeds.
+                             */
 
                         }
-
                         else {
 
                             env.ROLLBACK_PERFORMED = 'false'
@@ -1154,7 +1036,6 @@ EOF
         // ============================================================
 
         stage('Deactivate Old Color') {
-
             when {
                 expression {
                     return env.SMOKE_TEST_FAILED != 'true'
@@ -1164,10 +1045,8 @@ EOF
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -1176,31 +1055,33 @@ EOF
                         echo "=============================================="
                         echo "DEACTIVATE OLD COLOR"
                         echo "=============================================="
+                        echo "=============================================="
 
+                        OLD_DEPLOYMENT="user-service-${CURRENT_COLOR}"
 
-                        OLD_DEPLOYMENT="${USER_SERVICE}-${CURRENT_COLOR}"
+                        echo "Current active color:"
+                        echo "${CURRENT_COLOR}"
 
+                        echo "New active color:"
+                        echo "${TARGET_COLOR}"
 
-                        echo "Current active color : ${CURRENT_COLOR}"
-                        echo "New active color     : ${TARGET_COLOR}"
-                        echo "Old deployment       : ${OLD_DEPLOYMENT}"
+                        echo ""
+                        echo "Old deployment:"
+                        echo "${OLD_DEPLOYMENT}"
 
 
                         if kubectl get deployment "${OLD_DEPLOYMENT}" \
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
 
-
                             echo ""
-                            echo "Scaling old deployment to 0..."
-
+                            echo "Scaling old deployment to zero..."
 
                             kubectl scale deployment "${OLD_DEPLOYMENT}" \
                                 -n "${NAMESPACE}" \
                                 --replicas=0
 
-
                             echo ""
-                            echo "Old deployment scaled down."
+                            echo "Old deployment scaled to zero."
 
                         else
 
@@ -1214,15 +1095,10 @@ EOF
                         echo ""
                         echo "Current user-service deployments:"
 
-
-                        kubectl get deployment \
+                        kubectl get deployments \
                             -n "${NAMESPACE}" \
-                            -l "app=${USER_SERVICE}" \
+                            -l app=user-service \
                             -o wide
-
-
-                        echo ""
-                        echo "Old color deactivation complete."
                     '''
                 }
             }
@@ -1234,14 +1110,11 @@ EOF
         // ============================================================
 
         stage('Final Health Checks') {
-
             steps {
 
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: 'aws-terraform-user'
-                    ]
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
                 ]) {
 
                     sh '''
@@ -1250,45 +1123,56 @@ EOF
                         echo "=============================================="
                         echo "FINAL HEALTH CHECKS"
                         echo "=============================================="
+                        echo "=============================================="
+
+                        echo "Service:"
+
+                        kubectl get service "${USER_BG_SERVICE}" \
+                            -n "${NAMESPACE}" \
+                            -o wide
 
 
                         echo ""
                         echo "Service selector:"
 
-
-                        kubectl get service "${USER_SERVICE_BG}" \
+                        kubectl get service "${USER_BG_SERVICE}" \
                             -n "${NAMESPACE}" \
                             -o jsonpath='{.spec.selector}'
 
+                        echo
+
 
                         echo ""
-                        echo ""
-
-
-                        echo "Deployments:"
-
+                        echo "Active deployment:"
 
                         kubectl get deployment \
+                            "user-service-${CURRENT_COLOR}" \
                             -n "${NAMESPACE}" \
-                            -l "app=${USER_SERVICE}" \
                             -o wide
 
 
                         echo ""
-                        echo "Pods:"
+                        echo "All user-service deployments:"
 
+                        kubectl get deployments \
+                            -n "${NAMESPACE}" \
+                            -l app=user-service \
+                            -o wide
+
+
+                        echo ""
+                        echo "User-service pods:"
 
                         kubectl get pods \
                             -n "${NAMESPACE}" \
-                            -l "app=${USER_SERVICE}" \
+                            -l app=user-service \
                             -o wide
 
 
                         echo ""
                         echo "HPA:"
 
-
-                        kubectl get hpa user-service-hpa \
+                        kubectl get hpa "${HPA_NAME}" \
                             -n "${NAMESPACE}" \
                             -o wide
 
@@ -1296,29 +1180,15 @@ EOF
                         echo ""
                         echo "HPA target:"
 
-
-                        kubectl get hpa user-service-hpa \
+                        kubectl get hpa "${HPA_NAME}" \
                             -n "${NAMESPACE}" \
                             -o jsonpath='{.spec.scaleTargetRef.name}'
 
-
-                        echo ""
-                        echo ""
-
-
-                        echo "HPA metric:"
-
-
-                        kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics}'
+                        echo
 
 
                         echo ""
-                        echo ""
-
-
-                        echo "Final health checks complete."
+                        echo "Final health checks completed successfully."
                     '''
                 }
             }
@@ -1330,48 +1200,29 @@ EOF
         // ============================================================
 
         stage('Deployment Summary') {
-
             steps {
 
-                echo ''
-                echo '=============================================='
-                echo 'DEPLOYMENT SUMMARY'
-                echo '=============================================='
-
-
-                echo "Build number       : ${BUILD_NUMBER}"
-                echo "Image tag          : ${BUILD_NUMBER}"
-                echo "Service            : user-service"
-                echo "Current color      : ${CURRENT_COLOR}"
-                echo "Target color       : ${TARGET_COLOR}"
-                echo "Smoke test failed  : ${SMOKE_TEST_FAILED}"
-                echo "Rollback performed : ${ROLLBACK_PERFORMED}"
-
-
-                echo ''
-                echo 'Other services:'
-
-
-                echo 'product-service   -> SKIPPED'
-                echo 'cart-service      -> SKIPPED'
-                echo 'order-service     -> SKIPPED'
-                echo 'payment-service   -> SKIPPED'
-                echo 'inventory-service -> SKIPPED'
-
-
-                echo ''
-                echo 'CPU-only HPA:'
-
-
-                echo 'Min replicas      : 1'
-                echo 'Max replicas      : 2'
-                echo 'CPU target        : 70%'
-
-
-                echo ''
-                echo '=============================================='
-                echo 'USER-SERVICE DEPLOYMENT COMPLETE'
-                echo '=============================================='
+                echo ""
+                echo "=============================================="
+                echo "DEPLOYMENT SUMMARY"
+                echo "=============================================="
+                echo ""
+                echo "Service         : user-service"
+                echo "Deployment type : Blue/Green"
+                echo "HPA             : CPU only"
+                echo "CPU target      : ${HPA_CPU_TARGET}%"
+                echo "HPA min         : ${HPA_MIN_REPLICAS}"
+                echo "HPA max         : ${HPA_MAX_REPLICAS}"
+                echo ""
+                echo "Current color   : ${env.CURRENT_COLOR}"
+                echo "Target color    : ${env.TARGET_COLOR}"
+                echo "Smoke failed    : ${env.SMOKE_TEST_FAILED}"
+                echo "Rollback        : ${env.ROLLBACK_PERFORMED}"
+                echo ""
+                echo "Image:"
+                echo "${ECR_REGISTRY}/${USER_IMAGE}:${BUILD_NUMBER}"
+                echo ""
+                echo "=============================================="
             }
         }
     }
@@ -1384,60 +1235,59 @@ EOF
     post {
 
         success {
-
-            echo ''
-            echo '=============================================='
-            echo 'JENKINS BUILD SUCCESS'
-            echo '=============================================='
-
+            echo ""
+            echo "=============================================="
+            echo "PIPELINE FINISHED"
+            echo "=============================================="
 
             script {
 
                 if (env.ROLLBACK_PERFORMED == 'true') {
 
-                    echo ''
-                    echo 'NOTE:'
-                    echo 'The new color failed the smoke test.'
-                    echo 'Automatic rollback succeeded.'
-                    echo 'Traffic was restored to the previous color.'
-                    echo 'The failed color was scaled to 0.'
-                    echo 'Therefore the Jenkins build is SUCCESSFUL.'
+                    echo ""
+                    echo "JENKINS BUILD SUCCESSFUL"
+                    echo ""
+                    echo "Deployment failed smoke testing."
+                    echo "Automatic rollback completed successfully."
+                    echo "Previous color has been restored."
+
+                }
+                else {
+
+                    echo ""
+                    echo "JENKINS BUILD SUCCESSFUL"
+                    echo ""
+                    echo "Blue/Green deployment completed successfully."
+                    echo "Traffic is serving the new color."
                 }
             }
         }
 
 
         failure {
+            echo ""
+            echo "=============================================="
+            echo "PIPELINE FINISHED"
+            echo "=============================================="
 
-            echo ''
-            echo '=============================================='
-            echo 'JENKINS BUILD FAILED'
-            echo '=============================================='
-
-
-            script {
-
-                if (
-                    env.SMOKE_TEST_FAILED == 'true' &&
-                    env.ROLLBACK_PERFORMED != 'true'
-                ) {
-
-                    echo ''
-                    echo 'WARNING:'
-                    echo 'Smoke test failed and automatic rollback'
-                    echo 'did not complete successfully.'
-                    echo 'Manual Kubernetes intervention is required.'
-                }
-            }
+            echo ""
+            echo "JENKINS BUILD FAILED"
+            echo ""
+            echo "Review the stage above for the failure."
         }
 
 
         always {
+            echo ""
+            echo "=============================================="
+            echo "BUILD INFORMATION"
+            echo "=============================================="
 
-            echo ''
-            echo '=============================================='
-            echo 'PIPELINE FINISHED'
-            echo '=============================================='
+            echo "Build number : ${BUILD_NUMBER}"
+            echo "Job          : ${JOB_NAME}"
+            echo "Build URL    : ${BUILD_URL}"
+
+            echo "=============================================="
         }
     }
 }
