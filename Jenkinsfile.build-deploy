@@ -1,34 +1,38 @@
 pipeline {
+
     agent any
 
-    environment {
-        AWS_REGION          = 'ap-south-1'
-        EKS_CLUSTER         = 'ecommerce-eks'
-        NAMESPACE           = 'nodejs-devops'
-
-        AWS_ACCOUNT_ID      = '777000838263'
-        ECR_REGISTRY        = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
-        ECR_REPOSITORY      = 'ecommerce-user-service'
-
-        IMAGE_TAG           = "${BUILD_NUMBER}"
-
-        CURRENT_COLOR       = 'unknown'
-        TARGET_COLOR        = 'unknown'
-
-        SMOKE_TEST_FAILED   = 'false'
-        ROLLBACK_PERFORMED  = 'false'
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
     }
 
-    options {
-        timestamps()
-        disableConcurrentBuilds()
+    environment {
+        AWS_REGION       = 'ap-south-1'
+        EKS_CLUSTER      = 'ecommerce-eks'
+        NAMESPACE        = 'nodejs-devops'
+
+        AWS_ACCOUNT_ID   = '777000838263'
+        ECR_REGISTRY     = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_REPOSITORY   = 'ecommerce-user-service'
+
+        IMAGE_TAG        = "${BUILD_NUMBER}"
+
+        CURRENT_COLOR    = 'unknown'
+        TARGET_COLOR     = 'unknown'
+
+        SMOKE_TEST_FAILED = 'false'
+        ROLLBACK_PERFORMED = 'false'
     }
 
     stages {
 
         // ============================================================
-        // 1. CHECKOUT
+        // CHECKOUT
         // ============================================================
+
         stage('Checkout') {
             steps {
                 checkout([
@@ -41,6 +45,8 @@ pipeline {
                 ])
 
                 sh '''
+                    set -e
+
                     echo "=============================================="
                     echo "CHECKED OUT SOURCE"
                     echo "=============================================="
@@ -53,8 +59,9 @@ pipeline {
 
 
         // ============================================================
-        // 2. AWS LOGIN
+        // AWS LOGIN
         // ============================================================
+
         stage('AWS Login') {
             steps {
                 withCredentials([
@@ -91,7 +98,7 @@ pipeline {
                         echo "Logging into ECR..."
 
                         aws ecr get-login-password \
-                            --region "${AWS_REGION}" | \
+                            --region "${AWS_REGION}" |
                         docker login \
                             --username AWS \
                             --password-stdin "${ECR_REGISTRY}"
@@ -105,8 +112,9 @@ pipeline {
 
 
         // ============================================================
-        // 3. BUILD USER-SERVICE IMAGE
+        // BUILD USER SERVICE ONLY
         // ============================================================
+
         stage('Build user-service Image') {
             steps {
                 sh '''
@@ -133,20 +141,11 @@ pipeline {
 
 
         // ============================================================
-        // 4. PUSH USER-SERVICE IMAGE
+        // PUSH USER SERVICE IMAGE
         // ============================================================
+
         stage('Push user-service Image') {
             steps {
-                /*
-                 * IMPORTANT:
-                 *
-                 * The previous failure happened because
-                 * aws ecr describe-images was executed outside
-                 * the AWS credential scope.
-                 *
-                 * Both docker push and AWS CLI verification are
-                 * now inside withCredentials.
-                 */
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
                      credentialsId: 'aws-terraform-user']
@@ -157,6 +156,12 @@ pipeline {
                         echo "=============================================="
                         echo "PUSHING USER-SERVICE IMAGE"
                         echo "=============================================="
+
+                        aws ecr get-login-password \
+                            --region "${AWS_REGION}" |
+                        docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
 
                         docker push \
                             "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
@@ -178,17 +183,19 @@ pipeline {
 
 
         // ============================================================
-        // 5. ENSURE DATABASE SECRET
+        // DATABASE SECRET
         // ============================================================
+
         stage('Ensure Database Secret') {
             steps {
                 withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user'],
+
                     string(
                         credentialsId: 'rds-db-password',
                         variable: 'RDS_PASSWORD'
-                    ),
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
+                    )
                 ]) {
                     sh '''
                         set -e
@@ -197,15 +204,18 @@ pipeline {
                         echo "ENSURING DATABASE SECRET"
                         echo "=============================================="
 
+                        aws sts get-caller-identity >/dev/null
+
                         kubectl create secret generic ecommerce-db-secret \
                             -n "${NAMESPACE}" \
-                            --from-literal=POSTGRES_HOST='ecommerce-postgres.c7u8o4skoxo.ap-south-1.rds.amazonaws.com' \
-                            --from-literal=POSTGRES_PORT='5432' \
-                            --from-literal=POSTGRES_DB='ecommerce' \
-                            --from-literal=POSTGRES_USER='postgres' \
+                            --from-literal=POSTGRES_HOST=ecommerce-postgres.c7u8o4skoxo.ap-south-1.rds.amazonaws.com \
+                            --from-literal=POSTGRES_PORT=5432 \
+                            --from-literal=POSTGRES_DB=ecommerce \
+                            --from-literal=POSTGRES_USER=postgres \
                             --from-literal=POSTGRES_PASSWORD="${RDS_PASSWORD}" \
                             --dry-run=client \
-                            -o yaml | kubectl apply -f -
+                            -o yaml |
+                        kubectl apply -f -
 
                         echo ""
                         echo "Database secret status:"
@@ -219,77 +229,74 @@ pipeline {
 
 
         // ============================================================
-        // 6. DETERMINE ACTIVE COLOR
+        // DETERMINE ACTIVE COLOR
         // ============================================================
+
         stage('Determine Active Color') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    def detectedColor = sh(
-                        script: '''
-                            set -e
+                        def detectedColor = sh(
+                            script: '''
+                                set -e
 
-                            kubectl get service user-service-bg \
-                                -n "${NAMESPACE}" \
-                                -o go-template='{{index .spec.selector "version"}}'
-                        ''',
-                        returnStdout: true
-                    ).trim()
+                                kubectl get service user-service-bg \
+                                    -n "${NAMESPACE}" \
+                                    -o go-template='{{index .spec.selector "version"}}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
 
-                    echo "Detected color: '${detectedColor}'"
+                        echo "Detected color: '${detectedColor}'"
 
-                    if (detectedColor == 'blue') {
+                        if (detectedColor == 'blue') {
 
-                        env.CURRENT_COLOR = 'blue'
-                        env.TARGET_COLOR  = 'green'
+                            env.CURRENT_COLOR = 'blue'
+                            env.TARGET_COLOR  = 'green'
 
-                    } else if (detectedColor == 'green') {
+                        } else if (detectedColor == 'green') {
 
-                        env.CURRENT_COLOR = 'green'
-                        env.TARGET_COLOR  = 'blue'
+                            env.CURRENT_COLOR = 'green'
+                            env.TARGET_COLOR  = 'blue'
 
-                    } else {
+                        } else {
 
-                        error(
-                            "Invalid or empty active color: '${detectedColor}'. " +
-                            "Expected blue or green."
-                        )
+                            error(
+                                "Invalid or empty active color: '${detectedColor}'. " +
+                                "Expected blue or green."
+                            )
+                        }
+
+                        if (
+                            !env.CURRENT_COLOR ||
+                            env.CURRENT_COLOR == 'unknown' ||
+                            !env.TARGET_COLOR ||
+                            env.TARGET_COLOR == 'unknown'
+                        ) {
+                            error(
+                                "Blue/Green variables were not initialized correctly. " +
+                                "CURRENT_COLOR='${env.CURRENT_COLOR}', " +
+                                "TARGET_COLOR='${env.TARGET_COLOR}'"
+                            )
+                        }
+
+                        echo ""
+                        echo "Current color : ${env.CURRENT_COLOR}"
+                        echo "Target color  : ${env.TARGET_COLOR}"
                     }
-
-                    /*
-                     * Extra validation prevents:
-                     *
-                     * user-service-unknown
-                     *
-                     * from reaching the deployment stage.
-                     */
-                    if (!env.CURRENT_COLOR ||
-                        env.CURRENT_COLOR == 'unknown' ||
-                        !env.TARGET_COLOR ||
-                        env.TARGET_COLOR == 'unknown') {
-
-                        error(
-                            "Blue/Green color variables were not initialized correctly. " +
-                            "CURRENT_COLOR='${env.CURRENT_COLOR}', " +
-                            "TARGET_COLOR='${env.TARGET_COLOR}'"
-                        )
-                    }
-
-                    echo ""
-                    echo "=============================================="
-                    echo "BLUE/GREEN COLOR SELECTION"
-                    echo "=============================================="
-                    echo "Current color : ${env.CURRENT_COLOR}"
-                    echo "Target color  : ${env.TARGET_COLOR}"
-                    echo "=============================================="
                 }
             }
         }
 
 
         // ============================================================
-        // 7. PREPARE BLUE/GREEN TARGET
+        // PREPARE TARGET
         // ============================================================
+
         stage('Prepare Blue-Green Target') {
             steps {
                 withCredentials([
@@ -310,7 +317,6 @@ pipeline {
                         echo "TARGET_MANIFEST=${TARGET_MANIFEST}"
 
                         if [ ! -f "${TARGET_MANIFEST}" ]; then
-                            echo ""
                             echo "ERROR: Target manifest does not exist:"
                             echo "${TARGET_MANIFEST}"
                             exit 1
@@ -323,15 +329,13 @@ pipeline {
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
 
                             echo "Existing target deployment found."
+                            echo "Scaling it to zero before deployment..."
 
                             kubectl scale deployment "${TARGET_DEPLOYMENT}" \
                                 -n "${NAMESPACE}" \
                                 --replicas=0
-
                         else
-
                             echo "Target deployment does not exist."
-
                         fi
 
                         echo ""
@@ -341,7 +345,7 @@ pipeline {
                             -f "${TARGET_MANIFEST}"
 
                         echo ""
-                        echo "Updating image..."
+                        echo "Setting image..."
 
                         kubectl set image \
                             deployment/"${TARGET_DEPLOYMENT}" \
@@ -349,18 +353,14 @@ pipeline {
                             -n "${NAMESPACE}"
 
                         echo ""
-                        echo "Scaling target deployment to 1..."
+                        echo "Scaling target to one replica..."
 
                         kubectl scale deployment "${TARGET_DEPLOYMENT}" \
                             -n "${NAMESPACE}" \
                             --replicas=1
 
                         echo ""
-                        echo "Target deployment prepared."
-
-                        kubectl get deployment "${TARGET_DEPLOYMENT}" \
-                            -n "${NAMESPACE}" \
-                            -o wide
+                        echo "Blue/Green target prepared."
                     '''
                 }
             }
@@ -368,8 +368,9 @@ pipeline {
 
 
         // ============================================================
-        // 8. WAIT FOR TARGET
+        // WAIT FOR TARGET
         // ============================================================
+
         stage('Wait for Target') {
             steps {
                 withCredentials([
@@ -379,11 +380,14 @@ pipeline {
                     sh '''
                         set -e
 
+                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
+
                         echo "=============================================="
-                        echo "WAITING FOR TARGET ROLLOUT"
+                        echo "WAITING FOR TARGET"
                         echo "=============================================="
 
-                        TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                        echo "Deployment:"
+                        echo "${TARGET_DEPLOYMENT}"
 
                         kubectl rollout status \
                             deployment/"${TARGET_DEPLOYMENT}" \
@@ -399,7 +403,7 @@ pipeline {
                             -o wide
 
                         echo ""
-                        echo "Target rollout completed successfully."
+                        echo "Target deployment is healthy."
                     '''
                 }
             }
@@ -407,8 +411,9 @@ pipeline {
 
 
         // ============================================================
-        // 9. SWITCH TRAFFIC
+        // SWITCH TRAFFIC
         // ============================================================
+
         stage('Switch Traffic') {
             steps {
                 withCredentials([
@@ -422,14 +427,8 @@ pipeline {
                         echo "SWITCHING TRAFFIC"
                         echo "=============================================="
 
-                        echo ""
-                        echo "Current service selector:"
-
-                        kubectl get service user-service-bg \
-                            -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.selector}'
-
-                        echo ""
+                        echo "Switching service to:"
+                        echo "${TARGET_COLOR}"
 
                         cat > /tmp/user-service-bg-patch.json <<EOF
 {
@@ -460,18 +459,13 @@ EOF
                             -n "${NAMESPACE}" \
                             -o go-template='{{index .spec.selector "version"}}')
 
-                        echo ""
-                        echo "Active color after traffic switch: ${ACTIVE_COLOR}"
-
                         if [ "${ACTIVE_COLOR}" != "${TARGET_COLOR}" ]; then
-
-                            echo ""
                             echo "ERROR: Traffic switch verification failed."
+                            echo "Expected: ${TARGET_COLOR}"
+                            echo "Actual:   ${ACTIVE_COLOR}"
                             exit 1
-
                         fi
 
-                        echo ""
                         echo "Traffic successfully switched to ${TARGET_COLOR}."
                     '''
                 }
@@ -480,8 +474,9 @@ EOF
 
 
         // ============================================================
-        // 10. APPLY CPU-ONLY HPA
+        // CPU ONLY HPA
         // ============================================================
+
         stage('Apply CPU-only HPA') {
             steps {
                 withCredentials([
@@ -497,15 +492,11 @@ EOF
 
                         TARGET_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
-                        echo ""
-                        echo "Applying HPA manifest..."
+                        echo "Target deployment:"
+                        echo "${TARGET_DEPLOYMENT}"
 
                         kubectl apply \
                             -f k8s/user-hpa.yaml
-
-                        echo ""
-                        echo "Retargeting HPA to:"
-                        echo "${TARGET_DEPLOYMENT}"
 
                         cat > /tmp/user-hpa-patch.json <<EOF
 {
@@ -532,7 +523,7 @@ EOF
                             -o wide
 
                         echo ""
-                        echo "HPA target:"
+                        echo "HPA scale target:"
 
                         kubectl get hpa user-service-hpa \
                             -n "${NAMESPACE}" \
@@ -540,23 +531,14 @@ EOF
 
                         echo ""
 
-                        echo ""
-                        echo "HPA CPU metric:"
-
-                        kubectl get hpa user-service-hpa \
+                        if [ "$(kubectl get hpa user-service-hpa \
                             -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics[0].resource.name}'
+                            -o jsonpath='{.spec.scaleTargetRef.name}')" \
+                            != "${TARGET_DEPLOYMENT}" ]; then
 
-                        echo ""
-
-                        echo ""
-                        echo "HPA target utilization:"
-
-                        kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics[0].resource.target.averageUtilization}'
-
-                        echo "%"
+                            echo "ERROR: HPA is targeting the wrong deployment."
+                            exit 1
+                        fi
 
                         echo ""
                         echo "CPU-only HPA applied successfully."
@@ -567,78 +549,84 @@ EOF
 
 
         // ============================================================
-        // 11. SMOKE TEST ACTIVE COLOR
+        // SMOKE TEST
         // ============================================================
+
         stage('Smoke Test Active Color') {
             steps {
-                script {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    script {
 
-                    echo ""
-                    echo "=============================================="
-                    echo "SMOKE TEST ACTIVE COLOR"
-                    echo "=============================================="
+                        def smokeStatus = sh(
+                            script: '''
+                                set -e
 
-                    echo "Testing color: ${env.TARGET_COLOR}"
+                                echo "=============================================="
+                                echo "SMOKE TEST ACTIVE COLOR"
+                                echo "=============================================="
 
-                    echo "=============================================="
+                                echo "Active color:"
+                                echo "${TARGET_COLOR}"
 
-                    def smokeStatus = sh(
-                        script: '''
-                            set +e
+                                POD=$(kubectl get pods \
+                                    -n "${NAMESPACE}" \
+                                    -l app=user-service,version="${TARGET_COLOR}" \
+                                    -o jsonpath='{.items[0].metadata.name}')
 
-                            echo "Finding active user-service pod..."
+                                if [ -z "${POD}" ]; then
+                                    echo "ERROR: No active user-service pod found."
+                                    exit 1
+                                fi
 
-                            POD=$(kubectl get pods \
-                                -n "${NAMESPACE}" \
-                                -l app=user-service,version="${TARGET_COLOR}" \
-                                -o jsonpath='{.items[0].metadata.name}')
+                                echo "Testing pod:"
+                                echo "${POD}"
 
-                            if [ -z "${POD}" ]; then
-                                echo "ERROR: No active user-service pod found."
-                                exit 1
-                            fi
+                                STATUS=$(kubectl exec \
+                                    -n "${NAMESPACE}" \
+                                    "${POD}" \
+                                    -- python -c \
+                                    "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8001/docs', timeout=10).status)" \
+                                    | tail -1)
 
-                            echo "Testing pod: ${POD}"
+                                echo "HTTP status:"
+                                echo "${STATUS}"
 
-                            echo ""
-                            echo "Calling FastAPI /docs endpoint..."
+                                if [ "${STATUS}" != "200" ]; then
+                                    echo "Smoke test failed."
+                                    exit 1
+                                fi
 
-                            kubectl exec \
-                                -n "${NAMESPACE}" \
-                                "${POD}" \
-                                -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8001/docs', timeout=10).status)"
+                                echo ""
+                                echo "Smoke test passed successfully."
+                            ''',
+                            returnStatus: true
+                        )
 
-                            STATUS=$?
+                        if (smokeStatus != 0) {
 
-                            echo ""
-                            echo "Smoke test exit status: ${STATUS}"
+                            env.SMOKE_TEST_FAILED = 'true'
 
-                            exit ${STATUS}
-                        ''',
-                        returnStatus: true
-                    )
-
-                    if (smokeStatus != 0) {
-
-                        env.SMOKE_TEST_FAILED = 'true'
-
-                        echo """
+                            echo """
 ================================================
 ${env.TARGET_COLOR.toUpperCase()} DID NOT PASS THE SMOKE TEST
 ROLLING BACK TO ${env.CURRENT_COLOR.toUpperCase()}
 ================================================
 """
 
-                    } else {
+                        } else {
 
-                        env.SMOKE_TEST_FAILED = 'false'
+                            env.SMOKE_TEST_FAILED = 'false'
 
-                        echo """
+                            echo """
 ================================================
-SMOKE TEST PASSED
-ACTIVE COLOR: ${env.TARGET_COLOR.toUpperCase()}
+${env.TARGET_COLOR.toUpperCase()} PASSED THE SMOKE TEST
+NO ROLLBACK REQUIRED
 ================================================
 """
+                        }
                     }
                 }
             }
@@ -646,9 +634,11 @@ ACTIVE COLOR: ${env.TARGET_COLOR.toUpperCase()}
 
 
         // ============================================================
-        // 12. ROLLBACK BLUE/GREEN
+        // ROLLBACK
         // ============================================================
+
         stage('Rollback Blue-Green') {
+
             when {
                 expression {
                     env.SMOKE_TEST_FAILED == 'true'
@@ -663,24 +653,18 @@ ACTIVE COLOR: ${env.TARGET_COLOR.toUpperCase()}
                     sh '''
                         set -e
 
-                        echo ""
                         echo "================================================"
-                        echo "STARTING BLUE/GREEN ROLLBACK"
+                        echo "ROLLBACK BLUE/GREEN DEPLOYMENT"
                         echo "================================================"
 
                         OLD_DEPLOYMENT="user-service-${CURRENT_COLOR}"
                         FAILED_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
-                        echo ""
-                        echo "Previous active color : ${CURRENT_COLOR}"
-                        echo "Failed target color   : ${TARGET_COLOR}"
-                        echo "Old deployment        : ${OLD_DEPLOYMENT}"
-                        echo "Failed deployment     : ${FAILED_DEPLOYMENT}"
+                        echo "Restoring deployment:"
+                        echo "${OLD_DEPLOYMENT}"
 
                         echo ""
-                        echo "------------------------------------------------"
-                        echo "1. RESTORING OLD DEPLOYMENT"
-                        echo "------------------------------------------------"
+                        echo "Scaling old deployment to one replica..."
 
                         if kubectl get deployment "${OLD_DEPLOYMENT}" \
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
@@ -688,16 +672,13 @@ ACTIVE COLOR: ${env.TARGET_COLOR.toUpperCase()}
                             kubectl scale deployment "${OLD_DEPLOYMENT}" \
                                 -n "${NAMESPACE}" \
                                 --replicas=1
-
                         else
-
-                            echo "ERROR: Previous deployment does not exist."
+                            echo "ERROR: Old deployment does not exist."
                             exit 1
-
                         fi
 
                         echo ""
-                        echo "Waiting for previous deployment..."
+                        echo "Waiting for old deployment..."
 
                         kubectl rollout status \
                             deployment/"${OLD_DEPLOYMENT}" \
@@ -705,12 +686,7 @@ ACTIVE COLOR: ${env.TARGET_COLOR.toUpperCase()}
                             --timeout=5m
 
                         echo ""
-                        echo "Previous deployment is healthy."
-
-                        echo ""
-                        echo "------------------------------------------------"
-                        echo "2. RESTORING SERVICE TRAFFIC"
-                        echo "------------------------------------------------"
+                        echo "Restoring Service selector..."
 
                         cat > /tmp/user-service-bg-rollback.json <<EOF
 {
@@ -728,28 +704,8 @@ EOF
                             --type=merge \
                             --patch-file=/tmp/user-service-bg-rollback.json
 
-                        ACTIVE_COLOR=$(kubectl get service user-service-bg \
-                            -n "${NAMESPACE}" \
-                            -o go-template='{{index .spec.selector "version"}}')
-
                         echo ""
-                        echo "Service active color after rollback: ${ACTIVE_COLOR}"
-
-                        if [ "${ACTIVE_COLOR}" != "${CURRENT_COLOR}" ]; then
-
-                            echo ""
-                            echo "ERROR: Service traffic rollback failed."
-                            exit 1
-
-                        fi
-
-                        echo ""
-                        echo "Traffic restored to ${CURRENT_COLOR}."
-
-                        echo ""
-                        echo "------------------------------------------------"
-                        echo "3. RESTORING HPA TARGET"
-                        echo "------------------------------------------------"
+                        echo "Restoring HPA target..."
 
                         cat > /tmp/user-hpa-rollback.json <<EOF
 {
@@ -768,28 +724,8 @@ EOF
                             --type=merge \
                             --patch-file=/tmp/user-hpa-rollback.json
 
-                        HPA_TARGET=$(kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.scaleTargetRef.name}')
-
                         echo ""
-                        echo "HPA target after rollback: ${HPA_TARGET}"
-
-                        if [ "${HPA_TARGET}" != "${OLD_DEPLOYMENT}" ]; then
-
-                            echo ""
-                            echo "ERROR: HPA rollback failed."
-                            exit 1
-
-                        fi
-
-                        echo ""
-                        echo "HPA restored to ${OLD_DEPLOYMENT}."
-
-                        echo ""
-                        echo "------------------------------------------------"
-                        echo "4. DEACTIVATING FAILED COLOR"
-                        echo "------------------------------------------------"
+                        echo "Scaling failed deployment to zero..."
 
                         if kubectl get deployment "${FAILED_DEPLOYMENT}" \
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
@@ -797,86 +733,52 @@ EOF
                             kubectl scale deployment "${FAILED_DEPLOYMENT}" \
                                 -n "${NAMESPACE}" \
                                 --replicas=0
-
-                            echo ""
-                            echo "Failed deployment scaled to 0."
-
-                        else
-
-                            echo ""
-                            echo "Failed deployment does not exist."
-
                         fi
 
                         echo ""
-                        echo "------------------------------------------------"
-                        echo "5. VERIFYING ROLLBACK"
-                        echo "------------------------------------------------"
+                        echo "Verifying rollback..."
 
-                        echo ""
-                        echo "Deployments:"
-
-                        kubectl get deployments \
-                            -n "${NAMESPACE}" \
-                            -l app=user-service \
-                            -o wide
-
-                        echo ""
-                        echo "Pods:"
-
-                        kubectl get pods \
-                            -n "${NAMESPACE}" \
-                            -l app=user-service \
-                            -o wide
-
-                        echo ""
-                        echo "Service:"
-
-                        kubectl get service user-service-bg \
-                            -n "${NAMESPACE}" \
-                            -o wide
-
-                        echo ""
-                        echo "HPA:"
-
-                        kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o wide
-
-                        FINAL_COLOR=$(kubectl get service user-service-bg \
+                        ACTIVE_COLOR=$(kubectl get service user-service-bg \
                             -n "${NAMESPACE}" \
                             -o go-template='{{index .spec.selector "version"}}')
 
-                        FINAL_HPA_TARGET=$(kubectl get hpa user-service-hpa \
+                        HPA_TARGET=$(kubectl get hpa user-service-hpa \
                             -n "${NAMESPACE}" \
                             -o jsonpath='{.spec.scaleTargetRef.name}')
 
+                        echo "Service color : ${ACTIVE_COLOR}"
+                        echo "HPA target    : ${HPA_TARGET}"
+
+                        if [ "${ACTIVE_COLOR}" != "${CURRENT_COLOR}" ]; then
+                            echo "ERROR: Service rollback verification failed."
+                            exit 1
+                        fi
+
+                        if [ "${HPA_TARGET}" != "${OLD_DEPLOYMENT}" ]; then
+                            echo "ERROR: HPA rollback verification failed."
+                            exit 1
+                        fi
+
                         echo ""
-                        echo "Final service color : ${FINAL_COLOR}"
-                        echo "Final HPA target    : ${FINAL_HPA_TARGET}"
+                        echo "Old deployment after rollback:"
 
-                        if [ "${FINAL_COLOR}" != "${CURRENT_COLOR}" ]; then
+                        kubectl get deployment "${OLD_DEPLOYMENT}" \
+                            -n "${NAMESPACE}" \
+                            -o wide
 
-                            echo ""
-                            echo "ERROR: Final service color is incorrect."
-                            exit 1
+                        echo ""
+                        echo "Failed deployment after rollback:"
 
-                        fi
-
-                        if [ "${FINAL_HPA_TARGET}" != "${OLD_DEPLOYMENT}" ]; then
-
-                            echo ""
-                            echo "ERROR: Final HPA target is incorrect."
-                            exit 1
-
-                        fi
+                        kubectl get deployment "${FAILED_DEPLOYMENT}" \
+                            -n "${NAMESPACE}" \
+                            -o wide
 
                         echo ""
                         echo "================================================"
                         echo "ROLLBACK COMPLETED SUCCESSFULLY"
                         echo "TRAFFIC RESTORED TO ${CURRENT_COLOR}"
                         echo "HPA RESTORED TO ${OLD_DEPLOYMENT}"
-                        echo "${FAILED_DEPLOYMENT} SCALED TO 0"
+                        echo "FAILED ${TARGET_COLOR} DEPLOYMENT SCALED TO ZERO"
                         echo "================================================"
                     '''
 
@@ -889,9 +791,11 @@ EOF
 
 
         // ============================================================
-        // 13. FINALIZE SUCCESSFUL BLUE/GREEN DEPLOYMENT
+        // FINALIZE SUCCESSFUL DEPLOYMENT
         // ============================================================
+
         stage('Finalize Blue-Green Deployment') {
+
             when {
                 expression {
                     env.SMOKE_TEST_FAILED != 'true'
@@ -906,19 +810,18 @@ EOF
                     sh '''
                         set -e
 
-                        echo "=============================================="
+                        echo "================================================"
                         echo "FINALIZING BLUE/GREEN DEPLOYMENT"
-                        echo "=============================================="
+                        echo "================================================"
 
                         OLD_DEPLOYMENT="user-service-${CURRENT_COLOR}"
-                        NEW_DEPLOYMENT="user-service-${TARGET_COLOR}"
+                        ACTIVE_DEPLOYMENT="user-service-${TARGET_COLOR}"
+
+                        echo "Active deployment:"
+                        echo "${ACTIVE_DEPLOYMENT}"
 
                         echo ""
-                        echo "Current active color : ${CURRENT_COLOR}"
-                        echo "New active color     : ${TARGET_COLOR}"
-
-                        echo ""
-                        echo "Deactivating old deployment..."
+                        echo "Scaling old deployment to zero..."
 
                         if kubectl get deployment "${OLD_DEPLOYMENT}" \
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
@@ -927,28 +830,23 @@ EOF
                                 -n "${NAMESPACE}" \
                                 --replicas=0
 
-                            echo "Old deployment scaled to 0."
+                            echo "Old deployment scaled to zero."
 
                         else
 
                             echo "Old deployment does not exist."
-
                         fi
 
                         echo ""
-                        echo "Active deployment:"
-
-                        kubectl get deployment "${NEW_DEPLOYMENT}" \
-                            -n "${NAMESPACE}" \
-                            -o wide
-
-                        echo ""
-                        echo "All user-service deployments:"
+                        echo "Current user-service deployments:"
 
                         kubectl get deployments \
                             -n "${NAMESPACE}" \
                             -l app=user-service \
                             -o wide
+
+                        echo ""
+                        echo "Successful Blue/Green deployment finalized."
                     '''
                 }
             }
@@ -956,8 +854,9 @@ EOF
 
 
         // ============================================================
-        // 14. FINAL VERIFICATION
+        // FINAL VERIFICATION
         // ============================================================
+
         stage('Final Verification') {
             steps {
                 withCredentials([
@@ -967,9 +866,8 @@ EOF
                     sh '''
                         set -e
 
-                        echo ""
                         echo "================================================"
-                        echo "FINAL BLUE/GREEN VERIFICATION"
+                        echo "FINAL VERIFICATION"
                         echo "================================================"
 
                         if [ "${SMOKE_TEST_FAILED}" = "true" ]; then
@@ -977,116 +875,78 @@ EOF
                             EXPECTED_COLOR="${CURRENT_COLOR}"
                             EXPECTED_DEPLOYMENT="user-service-${CURRENT_COLOR}"
 
+                            echo "Deployment was rolled back."
+
                         else
 
                             EXPECTED_COLOR="${TARGET_COLOR}"
                             EXPECTED_DEPLOYMENT="user-service-${TARGET_COLOR}"
 
+                            echo "Deployment completed successfully."
                         fi
 
                         echo ""
-                        echo "Expected active color    : ${EXPECTED_COLOR}"
-                        echo "Expected HPA deployment : ${EXPECTED_DEPLOYMENT}"
+                        echo "Expected active color:"
+                        echo "${EXPECTED_COLOR}"
 
                         echo ""
-                        echo "------------------------------------------------"
-                        echo "SERVICE"
-                        echo "------------------------------------------------"
-
-                        kubectl get service user-service-bg \
-                            -n "${NAMESPACE}" \
-                            -o wide
+                        echo "Checking Service..."
 
                         ACTIVE_COLOR=$(kubectl get service user-service-bg \
                             -n "${NAMESPACE}" \
                             -o go-template='{{index .spec.selector "version"}}')
 
-                        echo ""
-                        echo "Actual active color: ${ACTIVE_COLOR}"
+                        echo "Service active color:"
+                        echo "${ACTIVE_COLOR}"
 
                         if [ "${ACTIVE_COLOR}" != "${EXPECTED_COLOR}" ]; then
-
-                            echo ""
-                            echo "ERROR: Service is pointing to unexpected color."
+                            echo "ERROR: Final Service verification failed."
                             exit 1
-
                         fi
 
                         echo ""
-                        echo "------------------------------------------------"
-                        echo "DEPLOYMENTS"
-                        echo "------------------------------------------------"
-
-                        kubectl get deployments \
-                            -n "${NAMESPACE}" \
-                            -l app=user-service \
-                            -o wide
-
-                        echo ""
-                        echo "------------------------------------------------"
-                        echo "PODS"
-                        echo "------------------------------------------------"
-
-                        kubectl get pods \
-                            -n "${NAMESPACE}" \
-                            -l app=user-service \
-                            -o wide
-
-                        echo ""
-                        echo "------------------------------------------------"
-                        echo "HPA"
-                        echo "------------------------------------------------"
-
-                        kubectl get hpa user-service-hpa \
-                            -n "${NAMESPACE}" \
-                            -o wide
+                        echo "Checking HPA..."
 
                         HPA_TARGET=$(kubectl get hpa user-service-hpa \
                             -n "${NAMESPACE}" \
                             -o jsonpath='{.spec.scaleTargetRef.name}')
 
-                        echo ""
-                        echo "Actual HPA target: ${HPA_TARGET}"
+                        echo "HPA target:"
+                        echo "${HPA_TARGET}"
 
                         if [ "${HPA_TARGET}" != "${EXPECTED_DEPLOYMENT}" ]; then
-
-                            echo ""
-                            echo "ERROR: HPA is pointing to unexpected deployment."
+                            echo "ERROR: Final HPA verification failed."
                             exit 1
-
                         fi
 
                         echo ""
-                        echo "------------------------------------------------"
-                        echo "HPA CPU CONFIGURATION"
-                        echo "------------------------------------------------"
+                        echo "Checking active deployment..."
 
-                        HPA_METRIC=$(kubectl get hpa user-service-hpa \
+                        kubectl get deployment "${EXPECTED_DEPLOYMENT}" \
                             -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics[0].resource.name}')
+                            -o wide
 
-                        HPA_TARGET_CPU=$(kubectl get hpa user-service-hpa \
+                        echo ""
+                        echo "Checking active pods..."
+
+                        kubectl get pods \
                             -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics[0].resource.target.averageUtilization}')
+                            -l app=user-service,version="${EXPECTED_COLOR}" \
+                            -o wide
 
-                        echo "Metric             : ${HPA_METRIC}"
-                        echo "Target utilization : ${HPA_TARGET_CPU}%"
+                        echo ""
+                        echo "Checking HPA configuration..."
 
-                        if [ "${HPA_METRIC}" != "cpu" ]; then
+                        kubectl get hpa user-service-hpa \
+                            -n "${NAMESPACE}" \
+                            -o wide
 
-                            echo ""
-                            echo "ERROR: HPA is not CPU-only."
-                            exit 1
+                        echo ""
+                        echo "Checking Service..."
 
-                        fi
-
-                        if [ "${HPA_TARGET_CPU}" != "70" ]; then
-
-                            echo ""
-                            echo "ERROR: HPA CPU target is not 70%."
-                            exit 1
-
-                        fi
+                        kubectl get service user-service-bg \
+                            -n "${NAMESPACE}" \
+                            -o wide
 
                         echo ""
                         echo "================================================"
@@ -1102,6 +962,7 @@ EOF
     // ================================================================
     // POST ACTIONS
     // ================================================================
+
     post {
 
         success {
@@ -1110,14 +971,13 @@ EOF
 JENKINS BUILD SUCCESS
 ============================================================
 
-User-service deployment completed successfully.
-
 Current color       : ${env.CURRENT_COLOR}
 Target color        : ${env.TARGET_COLOR}
 Smoke test failed   : ${env.SMOKE_TEST_FAILED}
 Rollback performed  : ${env.ROLLBACK_PERFORMED}
 Image tag           : ${env.IMAGE_TAG}
 
+User-service Blue/Green deployment completed successfully.
 ============================================================
 """
         }
@@ -1134,8 +994,8 @@ Smoke test failed   : ${env.SMOKE_TEST_FAILED}
 Rollback performed  : ${env.ROLLBACK_PERFORMED}
 Image tag           : ${env.IMAGE_TAG}
 
-If the failure occurred during rollback, manual
-investigation of the Kubernetes state is required.
+If failure occurred during rollback, manual
+investigation of Kubernetes state is required.
 
 ============================================================
 """
@@ -1149,7 +1009,6 @@ investigation of the Kubernetes state is required.
                 echo "================================================"
 
                 docker logout "${ECR_REGISTRY}" || true
-
                 docker image prune -f || true
 
                 echo ""
