@@ -44,6 +44,7 @@ pipeline {
                     echo "=============================================="
                     echo "CHECKED OUT SOURCE"
                     echo "=============================================="
+
                     git rev-parse --short HEAD
                     git log -1 --oneline
                 '''
@@ -104,7 +105,7 @@ pipeline {
 
 
         // ============================================================
-        // 3. BUILD USER SERVICE IMAGE
+        // 3. BUILD USER-SERVICE IMAGE
         // ============================================================
         stage('Build user-service Image') {
             steps {
@@ -123,6 +124,7 @@ pipeline {
 
                     echo ""
                     echo "Image built:"
+
                     docker images \
                         "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
                 '''
@@ -131,31 +133,46 @@ pipeline {
 
 
         // ============================================================
-        // 4. PUSH USER SERVICE IMAGE
+        // 4. PUSH USER-SERVICE IMAGE
         // ============================================================
         stage('Push user-service Image') {
             steps {
-                sh '''
-                    set -e
+                /*
+                 * IMPORTANT:
+                 *
+                 * The previous failure happened because
+                 * aws ecr describe-images was executed outside
+                 * the AWS credential scope.
+                 *
+                 * Both docker push and AWS CLI verification are
+                 * now inside withCredentials.
+                 */
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-terraform-user']
+                ]) {
+                    sh '''
+                        set -e
 
-                    echo "=============================================="
-                    echo "PUSHING USER-SERVICE IMAGE"
-                    echo "=============================================="
+                        echo "=============================================="
+                        echo "PUSHING USER-SERVICE IMAGE"
+                        echo "=============================================="
 
-                    docker push \
-                        "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+                        docker push \
+                            "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-                    echo ""
-                    echo "Verifying image in ECR..."
+                        echo ""
+                        echo "Verifying image in ECR..."
 
-                    aws ecr describe-images \
-                        --repository-name "${ECR_REPOSITORY}" \
-                        --image-ids imageTag="${IMAGE_TAG}" \
-                        --region "${AWS_REGION}"
+                        aws ecr describe-images \
+                            --repository-name "${ECR_REPOSITORY}" \
+                            --image-ids imageTag="${IMAGE_TAG}" \
+                            --region "${AWS_REGION}"
 
-                    echo ""
-                    echo "Image push completed."
-                '''
+                        echo ""
+                        echo "Image push and verification completed."
+                    '''
+                }
             }
         }
 
@@ -221,19 +238,6 @@ pipeline {
 
                     echo "Detected color: '${detectedColor}'"
 
-                    /*
-                     * IMPORTANT:
-                     *
-                     * Use env.CURRENT_COLOR and env.TARGET_COLOR.
-                     *
-                     * Do NOT use:
-                     *
-                     * CURRENT_COLOR = 'blue'
-                     *
-                     * because that creates/updates a Groovy variable rather
-                     * than the Pipeline environment variable used by later
-                     * stages.
-                     */
                     if (detectedColor == 'blue') {
 
                         env.CURRENT_COLOR = 'blue'
@@ -253,8 +257,11 @@ pipeline {
                     }
 
                     /*
-                     * Validate immediately so the pipeline fails here
-                     * instead of producing user-service-unknown later.
+                     * Extra validation prevents:
+                     *
+                     * user-service-unknown
+                     *
+                     * from reaching the deployment stage.
                      */
                     if (!env.CURRENT_COLOR ||
                         env.CURRENT_COLOR == 'unknown' ||
@@ -316,13 +323,15 @@ pipeline {
                             -n "${NAMESPACE}" >/dev/null 2>&1; then
 
                             echo "Existing target deployment found."
-                            echo "Scaling it down before applying the new version..."
 
                             kubectl scale deployment "${TARGET_DEPLOYMENT}" \
                                 -n "${NAMESPACE}" \
                                 --replicas=0
+
                         else
+
                             echo "Target deployment does not exist."
+
                         fi
 
                         echo ""
@@ -455,9 +464,11 @@ EOF
                         echo "Active color after traffic switch: ${ACTIVE_COLOR}"
 
                         if [ "${ACTIVE_COLOR}" != "${TARGET_COLOR}" ]; then
+
                             echo ""
                             echo "ERROR: Traffic switch verification failed."
                             exit 1
+
                         fi
 
                         echo ""
@@ -566,7 +577,9 @@ EOF
                     echo "=============================================="
                     echo "SMOKE TEST ACTIVE COLOR"
                     echo "=============================================="
+
                     echo "Testing color: ${env.TARGET_COLOR}"
+
                     echo "=============================================="
 
                     def smokeStatus = sh(
@@ -680,6 +693,7 @@ ACTIVE COLOR: ${env.TARGET_COLOR.toUpperCase()}
 
                             echo "ERROR: Previous deployment does not exist."
                             exit 1
+
                         fi
 
                         echo ""
@@ -722,9 +736,11 @@ EOF
                         echo "Service active color after rollback: ${ACTIVE_COLOR}"
 
                         if [ "${ACTIVE_COLOR}" != "${CURRENT_COLOR}" ]; then
+
                             echo ""
                             echo "ERROR: Service traffic rollback failed."
                             exit 1
+
                         fi
 
                         echo ""
@@ -760,9 +776,11 @@ EOF
                         echo "HPA target after rollback: ${HPA_TARGET}"
 
                         if [ "${HPA_TARGET}" != "${OLD_DEPLOYMENT}" ]; then
+
                             echo ""
                             echo "ERROR: HPA rollback failed."
                             exit 1
+
                         fi
 
                         echo ""
@@ -787,6 +805,7 @@ EOF
 
                             echo ""
                             echo "Failed deployment does not exist."
+
                         fi
 
                         echo ""
@@ -837,15 +856,19 @@ EOF
                         echo "Final HPA target    : ${FINAL_HPA_TARGET}"
 
                         if [ "${FINAL_COLOR}" != "${CURRENT_COLOR}" ]; then
+
                             echo ""
                             echo "ERROR: Final service color is incorrect."
                             exit 1
+
                         fi
 
                         if [ "${FINAL_HPA_TARGET}" != "${OLD_DEPLOYMENT}" ]; then
+
                             echo ""
                             echo "ERROR: Final HPA target is incorrect."
                             exit 1
+
                         fi
 
                         echo ""
@@ -909,6 +932,7 @@ EOF
                         else
 
                             echo "Old deployment does not exist."
+
                         fi
 
                         echo ""
@@ -961,8 +985,8 @@ EOF
                         fi
 
                         echo ""
-                        echo "Expected active color      : ${EXPECTED_COLOR}"
-                        echo "Expected HPA deployment   : ${EXPECTED_DEPLOYMENT}"
+                        echo "Expected active color    : ${EXPECTED_COLOR}"
+                        echo "Expected HPA deployment : ${EXPECTED_DEPLOYMENT}"
 
                         echo ""
                         echo "------------------------------------------------"
@@ -981,9 +1005,11 @@ EOF
                         echo "Actual active color: ${ACTIVE_COLOR}"
 
                         if [ "${ACTIVE_COLOR}" != "${EXPECTED_COLOR}" ]; then
+
                             echo ""
                             echo "ERROR: Service is pointing to unexpected color."
                             exit 1
+
                         fi
 
                         echo ""
@@ -1023,9 +1049,11 @@ EOF
                         echo "Actual HPA target: ${HPA_TARGET}"
 
                         if [ "${HPA_TARGET}" != "${EXPECTED_DEPLOYMENT}" ]; then
+
                             echo ""
                             echo "ERROR: HPA is pointing to unexpected deployment."
                             exit 1
+
                         fi
 
                         echo ""
@@ -1033,17 +1061,32 @@ EOF
                         echo "HPA CPU CONFIGURATION"
                         echo "------------------------------------------------"
 
-                        kubectl get hpa user-service-hpa \
+                        HPA_METRIC=$(kubectl get hpa user-service-hpa \
                             -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics[0].resource.name}'
+                            -o jsonpath='{.spec.metrics[0].resource.name}')
 
-                        echo ""
-
-                        kubectl get hpa user-service-hpa \
+                        HPA_TARGET_CPU=$(kubectl get hpa user-service-hpa \
                             -n "${NAMESPACE}" \
-                            -o jsonpath='{.spec.metrics[0].resource.target.averageUtilization}'
+                            -o jsonpath='{.spec.metrics[0].resource.target.averageUtilization}')
 
-                        echo "%"
+                        echo "Metric             : ${HPA_METRIC}"
+                        echo "Target utilization : ${HPA_TARGET_CPU}%"
+
+                        if [ "${HPA_METRIC}" != "cpu" ]; then
+
+                            echo ""
+                            echo "ERROR: HPA is not CPU-only."
+                            exit 1
+
+                        fi
+
+                        if [ "${HPA_TARGET_CPU}" != "70" ]; then
+
+                            echo ""
+                            echo "ERROR: HPA CPU target is not 70%."
+                            exit 1
+
+                        fi
 
                         echo ""
                         echo "================================================"
@@ -1115,3 +1158,4 @@ investigation of the Kubernetes state is required.
         }
     }
 }
+
