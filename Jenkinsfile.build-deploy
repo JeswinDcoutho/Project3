@@ -652,6 +652,9 @@ pipeline {
                         echo "Patching service selector..."
 
                         kubectl patch service "${USER_BG_SERVICE}" \
+                                        -n "${NAMESPACE}" \
+                                        --type='merge' \
+                                        -p '{"spec":{"selector":{"app":"user-service","version":"'${TARGET_COLOR}'"}}}'
                             -n "${NAMESPACE}" \
                             --type='merge' \
                             -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${TARGET_COLOR}\"}}}"
