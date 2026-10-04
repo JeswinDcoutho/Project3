@@ -34,7 +34,7 @@ spec:
 
           env:
             - name: POSTGRES_DB
-              value: user_db
+              value: ecommerce
 
             - name: POSTGRES_USER
               valueFrom:
