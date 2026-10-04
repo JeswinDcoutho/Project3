@@ -832,7 +832,7 @@ EOF
                                 kubectl exec \
                                     -n "${NAMESPACE}" \
                                     "${POD}" \
-                                    -- sh -c 'curl -fsS http://127.0.0.1:8001/health'
+                                    -- python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=5)'
 
                                 if [ $? -eq 0 ]; then
                                     echo ""
@@ -848,7 +848,7 @@ EOF
                                 kubectl exec \
                                     -n "${NAMESPACE}" \
                                     "${POD}" \
-                                    -- sh -c 'curl -fsS http://127.0.0.1:8001/healthz'
+                                    -- python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/healthz", timeout=5)'
 
                                 if [ $? -eq 0 ]; then
                                     echo ""
@@ -864,7 +864,7 @@ EOF
                                 kubectl exec \
                                     -n "${NAMESPACE}" \
                                     "${POD}" \
-                                    -- sh -c 'curl -fsS http://127.0.0.1:8001/'
+                                    -- python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/", timeout=5)'
 
                                 if [ $? -eq 0 ]; then
                                     echo ""
@@ -1174,7 +1174,7 @@ EOF
                                 kubectl patch service "${USER_BG_SERVICE}" \
                                     -n "${NAMESPACE}" \
                                     --type='merge' \
-                                    -p "{\"spec\":{\"selector\":{\"app\":\"user-service\",\"version\":\"${CURRENT_COLOR}\"}}}"
+                                    -p '{"spec":{"selector":{"app":"user-service","version":"'${CURRENT_COLOR}'"}}}
 
 
                                 echo ""
