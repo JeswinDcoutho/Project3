@@ -1,69 +1,134 @@
 pipeline {
     agent any
 
-    options {
-        timestamps()
-        disableConcurrentBuilds()
-        skipDefaultCheckout(true)
-    }
-
     environment {
         AWS_DEFAULT_REGION = 'ap-south-1'
-        AWS_REGION         = 'ap-south-1'
+        AWS_ACCOUNT_ID     = '777000838263'
+        ECR_REGISTRY       = '777000838263.dkr.ecr.ap-south-1.amazonaws.com'
+        EKS_CLUSTER        = 'ecommerce-eks'
+        NAMESPACE          = 'nodejs-devops'
 
-        TF_DIR             = 'terraform'
+        // Jenkins build number is used as the Docker image tag.
+        IMAGE_TAG = "${BUILD_NUMBER}"
+
+        // Dedicated S3 object for the Kubernetes database secret.
+        DB_SECRET_S3_URI = 's3://ecommerce-terraform-state-777000838263/ecommerce/secrets/ecommerce-db-secret.json'
     }
 
     stages {
 
-        stage('Checkout') {
+        // =========================================================
+        // 1. GIT CHECKOUT
+        // =========================================================
+
+        stage('Git Checkout') {
             steps {
-                checkout scm
+                git branch: 'master',
+                    credentialsId: 'github',
+                    url: 'https://github.com/JeswinDcoutho/Project3.git'
             }
         }
 
-        stage('Terraform Version') {
-            steps {
-                sh '''
-                    set -e
 
-                    terraform version
-                    aws --version
-                '''
-            }
-        }
+        // =========================================================
+        // 2. TERRAFORM INITIALIZATION
+        // =========================================================
 
         stage('Terraform Init') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user']
+                     credentialsId: 'aws-terraform-user'],
+
+                    string(
+                        credentialsId: 'rds-db-password',
+                        variable: 'TF_VAR_db_password'
+                    )
                 ]) {
                     sh '''
                         set -e
 
-                        cd "$TF_DIR"
+                        echo "======================================"
+                        echo " Terraform Initialization"
+                        echo "======================================"
 
+                        echo "===== Terraform Init: VPC ====="
+                        cd terraform/vpc
                         terraform init
+
+                        echo "===== Terraform Init: ECR ====="
+                        cd ../ecr
+                        terraform init
+
+                        echo "===== Terraform Init: EKS ====="
+                        cd ../eks
+                        terraform init
+
+                        echo "===== Terraform Init: RDS ====="
+                        cd ../rds
+                        terraform init
+
+                        echo "===== Terraform Init: Redis ====="
+                        cd ../redis
+                        terraform init
+
+                        echo "======================================"
+                        echo " Terraform initialization completed"
+                        echo "======================================"
                     '''
                 }
             }
         }
+
+
+        // =========================================================
+        // 3. TERRAFORM VALIDATION
+        // =========================================================
 
         stage('Terraform Validate') {
             steps {
                 sh '''
                     set -e
 
-                    cd "$TF_DIR"
+                    echo "======================================"
+                    echo " Terraform Validation"
+                    echo "======================================"
 
+                    echo "===== Validating VPC ====="
+                    cd terraform/vpc
                     terraform validate
+
+                    echo "===== Validating ECR ====="
+                    cd ../ecr
+                    terraform validate
+
+                    echo "===== Validating EKS ====="
+                    cd ../eks
+                    terraform validate
+
+                    echo "===== Validating RDS ====="
+                    cd ../rds
+                    terraform validate
+
+                    echo "===== Validating Redis ====="
+                    cd ../redis
+                    terraform validate
+
+                    echo "======================================"
+                    echo " All Terraform configurations valid"
+                    echo "======================================"
                 '''
             }
         }
 
-        stage('Terraform Plan') {
+
+        // =========================================================
+        // 4. TERRAFORM INFRASTRUCTURE
+        // =========================================================
+
+        stage('Terraform Infrastructure') {
             steps {
+
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
                      credentialsId: 'aws-terraform-user'],
@@ -73,56 +138,219 @@ pipeline {
                         variable: 'TF_VAR_db_password'
                     )
                 ]) {
+
                     sh '''
                         set -e
 
-                        cd "$TF_DIR"
+                        echo "======================================"
+                        echo " Terraform Infrastructure Deployment"
+                        echo "======================================"
+
+
+                        # ==================================================
+                        # VPC
+                        # ==================================================
+
+                        echo
+                        echo "======================================"
+                        echo " STEP 1: VPC"
+                        echo "======================================"
+
+                        cd terraform/vpc
+
+                        echo "===== Terraform Plan: VPC ====="
+                        terraform plan
+
+                        echo "===== Terraform Apply: VPC ====="
+                        terraform apply -auto-approve
+
+                        echo "===== Reading VPC ID ====="
+
+                        VPC_ID=$(terraform output -raw vpc_id)
+
+                        if [ -z "$VPC_ID" ]; then
+                            echo "ERROR: VPC ID was not returned by Terraform."
+                            exit 1
+                        fi
+
+                        echo "Active VPC: $VPC_ID"
+
+                        cd ../..
+
+
+                        # ==================================================
+                        # ECR
+                        # ==================================================
+
+                        echo
+                        echo "======================================"
+                        echo " STEP 2: ECR"
+                        echo "======================================"
+
+                        cd terraform/ecr
+
+                        echo "===== Terraform Plan: ECR ====="
+                        terraform plan
+
+                        echo "===== Terraform Apply: ECR ====="
+                        terraform apply -auto-approve
+
+                        cd ../..
+
+
+                        # ==================================================
+                        # EKS
+                        # ==================================================
+
+                        echo
+                        echo "======================================"
+                        echo " STEP 3: EKS"
+                        echo "======================================"
+
+                        echo "Using VPC: $VPC_ID"
+
+                        cd terraform/eks
+
+                        echo "===== Terraform Plan: EKS ====="
 
                         terraform plan \
-                            -out=tfplan
-                    '''
-                }
-            }
-        }
+                            -var="vpc_id=$VPC_ID"
 
-        stage('Terraform Apply') {
-            steps {
-                input message: 'Apply Terraform infrastructure?', ok: 'Apply'
+                        echo "===== Terraform Apply: EKS ====="
 
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-terraform-user'],
+                        terraform apply \
+                            -auto-approve \
+                            -var="vpc_id=$VPC_ID"
 
-                    string(
-                        credentialsId: 'rds-db-password',
-                        variable: 'TF_VAR_db_password'
-                    )
-                ]) {
-                    sh '''
-                        set -e
+                        echo "===== Reading EKS Security Group ID ====="
 
-                        cd "$TF_DIR"
+                        EKS_SG_ID=$(terraform output -raw cluster_security_group_id)
 
-                        terraform apply -auto-approve tfplan
+                        if [ -z "$EKS_SG_ID" ]; then
+                            echo "ERROR: EKS security group ID was not returned by Terraform."
+                            exit 1
+                        fi
+
+                        echo "Active EKS Security Group: $EKS_SG_ID"
+
+                        cd ../..
+
+
+                        # ==================================================
+                        # RDS
+                        # ==================================================
+
+                        echo
+                        echo "======================================"
+                        echo " STEP 4: RDS PostgreSQL"
+                        echo "======================================"
+
+                        echo "Using VPC: $VPC_ID"
+                        echo "Using EKS Security Group: $EKS_SG_ID"
+
+                        cd terraform/rds
+
+                        echo "===== Terraform Plan: RDS ====="
+
+                        terraform plan \
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
+
+                        echo "===== Terraform Apply: RDS ====="
+
+                        terraform apply \
+                            -auto-approve \
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
+
+                        cd ../..
+
+
+                        # ==================================================
+                        # REDIS
+                        # ==================================================
+
+                        echo
+                        echo "======================================"
+                        echo " STEP 5: Redis"
+                        echo "======================================"
+
+                        echo "Using VPC: $VPC_ID"
+                        echo "Using EKS Security Group: $EKS_SG_ID"
+
+                        cd terraform/redis
+
+                        echo "===== Terraform Plan: Redis ====="
+
+                        terraform plan \
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
+
+                        echo "===== Terraform Apply: Redis ====="
+
+                        terraform apply \
+                            -auto-approve \
+                            -var="vpc_id=$VPC_ID" \
+                            -var="eks_security_group_id=$EKS_SG_ID"
+
+                        cd ../..
+
+
+                        # ==================================================
+                        # FINAL INFORMATION
+                        # ==================================================
+
+                        echo
+                        echo "======================================"
+                        echo " Terraform Infrastructure SUCCESS"
+                        echo "======================================"
+
+                        echo "VPC ID    : $VPC_ID"
+                        echo "EKS SG ID : $EKS_SG_ID"
+                        echo "EKS       : $EKS_CLUSTER"
+                        echo "Region    : $AWS_DEFAULT_REGION"
+                        echo "Namespace : $NAMESPACE"
+
+                        echo "======================================"
+                        echo " Infrastructure created successfully"
+                        echo "======================================"
                     '''
                 }
             }
         }
     }
 
+
+    // =============================================================
+    // POST BUILD
+    // =============================================================
+
     post {
+
         success {
-            echo 'Terraform infrastructure deployment completed successfully.'
+            echo '''
+========================================
+Terraform Infrastructure Pipeline SUCCESS
+========================================
+VPC, ECR, EKS, RDS and Redis
+have been successfully created/updated.
+========================================
+'''
         }
 
         failure {
-            echo 'Terraform pipeline failed.'
+            echo '''
+========================================
+Terraform Infrastructure Pipeline FAILED
+========================================
+Check the Jenkins console output
+for the failed Terraform stage.
+========================================
+'''
         }
 
         always {
-            sh '''
-                rm -f "$WORKSPACE/terraform/tfplan" 2>/dev/null || true
-            '''
+            echo "Terraform pipeline execution completed."
         }
     }
 }
